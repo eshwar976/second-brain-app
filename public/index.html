@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Second Brain Capture</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <svg class="icon-sprite" aria-hidden="true">
+      <symbol id="icon-log" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8"></circle>
+        <path d="M12 7v5l3 2"></path>
+      </symbol>
+      <symbol id="icon-thought" viewBox="0 0 24 24">
+        <path d="M8.5 15.5h7"></path>
+        <path d="M9 18h6"></path>
+        <path d="M10 21h4"></path>
+        <path d="M8 12.5a5 5 0 1 1 8 0c-.9.8-1.2 1.5-1.2 2.2H9.2c0-.7-.3-1.4-1.2-2.2Z"></path>
+      </symbol>
+      <symbol id="icon-idea" viewBox="0 0 24 24">
+        <path d="M9 18h6"></path>
+        <path d="M10 21h4"></path>
+        <path d="M12 3v2"></path>
+        <path d="m5 6.5 1.4 1.4"></path>
+        <path d="m19 6.5-1.4 1.4"></path>
+        <path d="M12 6a5 5 0 0 0-3 9h6a5 5 0 0 0-3-9Z"></path>
+      </symbol>
+      <symbol id="icon-todo" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="8"></circle>
+        <path d="m8.5 12.5 2.2 2.2 4.8-5"></path>
+      </symbol>
+      <symbol id="icon-reflection" viewBox="0 0 24 24">
+        <path d="M18 15.5A7 7 0 0 1 8.5 6a7.5 7.5 0 1 0 9.5 9.5Z"></path>
+        <path d="M15.5 4.5 16 6l1.5.5L16 7l-.5 1.5L15 7l-1.5-.5L15 6l.5-1.5Z"></path>
+      </symbol>
+    </svg>
+    <main class="app-shell">
+      <section class="capture-screen" aria-label="Capture">
+        <header class="top-bar">
+          <div>
+            <p class="eyebrow">fleeting · <span id="current-month">loading</span></p>
+            <h1>Capture</h1>
+          </div>
+          <div class="vault-pill" aria-live="polite">
+            <span class="status-dot"></span>
+            <span id="vault-name">vault</span>
+          </div>
+        </header>
+
+        <section class="timeline" id="timeline" aria-live="polite" aria-label="Recent captures">
+          <div class="empty-state">
+            <p class="empty-title">Nothing in this month yet.</p>
+            <p>Start with the smallest useful fragment.</p>
+          </div>
+        </section>
+
+        <form class="composer" id="capture-form">
+          <fieldset class="chips" aria-label="Capture category">
+            <button class="chip chip-log" type="button" data-category="log">
+              <svg aria-hidden="true"><use href="#icon-log"></use></svg><span class="chip-label">log</span>
+            </button>
+            <button class="chip chip-thought is-active" type="button" data-category="thought">
+              <svg aria-hidden="true"><use href="#icon-thought"></use></svg><span class="chip-label">thought</span>
+            </button>
+            <button class="chip chip-idea" type="button" data-category="idea">
+              <svg aria-hidden="true"><use href="#icon-idea"></use></svg><span class="chip-label">idea</span>
+            </button>
+            <button class="chip chip-todo" type="button" data-category="todo">
+              <svg aria-hidden="true"><use href="#icon-todo"></use></svg><span class="chip-label">todo</span>
+            </button>
+            <button class="chip chip-reflection" type="button" data-category="reflection">
+              <svg aria-hidden="true"><use href="#icon-reflection"></use></svg><span class="chip-label">reflection</span>
+            </button>
+          </fieldset>
+
+          <div class="input-row">
+            <label class="sr-only" for="capture-text">Capture text</label>
+            <textarea
+              id="capture-text"
+              rows="1"
+              placeholder="Capture before it gets polished..."
+              autocomplete="off"
+              spellcheck="true"
+            ></textarea>
+            <button class="send-button" type="submit" aria-label="Append capture">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 19V5m0 0-6 6m6-6 6 6" />
+              </svg>
+            </button>
+          </div>
+
+          <p class="helper-line" id="helper-line">Append to fleeting/YYYY-MM.md</p>
+        </form>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
