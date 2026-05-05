@@ -27,6 +27,8 @@ const vaultName = document.querySelector("#vault-name");
 const currentMonth = document.querySelector("#current-month");
 const sendButton = document.querySelector(".send-button");
 const chips = Array.from(document.querySelectorAll(".chip"));
+const navItems = Array.from(document.querySelectorAll(".nav-item"));
+const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
 
 init();
 
@@ -38,6 +40,12 @@ async function init() {
 }
 
 function wireInteractions() {
+  navItems.forEach((item) => {
+    item.addEventListener("click", () => {
+      setActiveTab(item.dataset.tab);
+    });
+  });
+
   chips.forEach((chip) => {
     chip.addEventListener("click", () => {
       state.category = chip.dataset.category;
@@ -63,6 +71,28 @@ function wireInteractions() {
     if (!text) return;
     await submitCapture(text);
   });
+}
+
+function setActiveTab(tab) {
+  navItems.forEach((item) => {
+    const isActive = item.dataset.tab === tab;
+    item.classList.toggle("is-active", isActive);
+    if (isActive) {
+      item.setAttribute("aria-current", "page");
+    } else {
+      item.removeAttribute("aria-current");
+    }
+  });
+
+  tabPanels.forEach((panel) => {
+    const isActive = panel.dataset.tabPanel === tab;
+    panel.classList.toggle("is-active", isActive);
+    panel.hidden = !isActive;
+  });
+
+  if (tab === "capture") {
+    textarea.focus();
+  }
 }
 
 async function loadConfig() {

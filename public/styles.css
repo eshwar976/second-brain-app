@@ -56,12 +56,64 @@ textarea {
   height: calc(100vh - 64px);
   min-height: 620px;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-columns: 92px minmax(0, 1fr);
   overflow: hidden;
   border: 1px solid rgba(221, 214, 204, 0.88);
   border-radius: 8px;
   background: rgba(255, 252, 247, 0.82);
   box-shadow: var(--shadow);
+}
+
+.app-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 10px;
+  border-right: 1px solid rgba(221, 214, 204, 0.78);
+  background: rgba(255, 252, 247, 0.88);
+}
+
+.nav-item {
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  min-height: 66px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.nav-item svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav-item.is-active {
+  border-color: rgba(95, 127, 101, 0.26);
+  background: rgba(95, 127, 101, 0.1);
+  color: #405c45;
+}
+
+.tab-panel {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+}
+
+.tab-panel[hidden] {
+  display: none;
 }
 
 .top-bar {
@@ -123,6 +175,50 @@ h1 {
   overflow-y: auto;
   padding: clamp(16px, 2.5vw, 28px) clamp(12px, 2.5vw, 28px) 12px;
   scroll-behavior: smooth;
+}
+
+.placeholder-view {
+  display: grid;
+  align-items: end;
+  padding: clamp(16px, 2.5vw, 28px);
+  overflow: auto;
+}
+
+.placeholder-card {
+  width: min(100%, 720px);
+  border: 1px solid rgba(221, 214, 204, 0.82);
+  border-left: 4px solid rgba(95, 127, 101, 0.65);
+  border-radius: 8px;
+  background: rgba(255, 252, 247, 0.9);
+  padding: 18px;
+}
+
+.placeholder-kicker {
+  margin: 0 0 8px;
+  color: var(--sage);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.placeholder-card h2 {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 20px;
+  letter-spacing: 0;
+}
+
+.placeholder-card p:last-child {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.placeholder-composer .input-row,
+.input-row.is-disabled {
+  min-height: 60px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 14px;
 }
 
 .timeline::before {
@@ -387,9 +483,39 @@ textarea::placeholder {
     max-width: 100vw;
     height: 100vh;
     min-height: 100vh;
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
     border: 0;
     border-radius: 0;
     box-shadow: none;
+  }
+
+  .app-nav {
+    grid-row: 2;
+    flex-direction: row;
+    justify-content: space-around;
+    gap: 2px;
+    padding: 6px 6px max(6px, env(safe-area-inset-bottom));
+    border-right: 0;
+    border-top: 1px solid rgba(221, 214, 204, 0.82);
+  }
+
+  .nav-item {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 48px;
+    gap: 3px;
+    font-size: 10px;
+  }
+
+  .nav-item svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .tab-panel {
+    grid-row: 1;
+    min-height: 0;
   }
 
   .chips {
