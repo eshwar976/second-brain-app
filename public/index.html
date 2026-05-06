@@ -151,17 +151,34 @@
         <section class="tab-panel" data-tab-panel="tasks" aria-label="Tasks" hidden>
           <header class="top-bar">
             <div>
-              <p class="eyebrow">execution layer · planned</p>
+              <p class="eyebrow">execution layer · indexed</p>
               <h1>Tasks</h1>
             </div>
-            <div class="vault-pill"><span class="status-dot"></span><span>WIP</span></div>
+            <div class="vault-pill"><span class="status-dot"></span><span id="tasks-count">0 open</span></div>
           </header>
-          <section class="placeholder-view">
-            <article class="placeholder-card">
-              <p class="placeholder-kicker">Work in progress</p>
-              <h2>Embedded Markdown tasks will appear here.</h2>
-              <p>Later this will group open tasks from notes into Today, Upcoming, and Inbox.</p>
-            </article>
+          <section class="workspace-view">
+            <div class="view-toolbar">
+              <p>Open Markdown tasks from the indexed vault.</p>
+              <button class="secondary-button" id="tasks-refresh-button" type="button">Refresh</button>
+            </div>
+            <div class="filter-strip" aria-label="Task filters">
+              <button class="filter-pill is-active" type="button" data-task-filter="all" data-scope="all" data-focus="all">All</button>
+              <button class="filter-pill" type="button" data-task-filter="do-now" data-scope="all" data-focus="do-now">Do now</button>
+              <button class="filter-pill" type="button" data-task-filter="schedule" data-scope="all" data-focus="schedule">Schedule</button>
+              <button class="filter-pill" type="button" data-task-filter="quick" data-scope="all" data-focus="quick">Quick</button>
+              <button class="filter-pill" type="button" data-task-filter="someday" data-scope="all" data-focus="someday">Someday</button>
+              <button class="filter-pill" type="button" data-task-filter="work" data-scope="work" data-focus="all">Work</button>
+              <button class="filter-pill" type="button" data-task-filter="personal" data-scope="personal" data-focus="all">Personal</button>
+              <button class="filter-pill" type="button" data-task-filter="due" data-scope="all" data-focus="due">Due</button>
+              <button class="filter-pill" type="button" data-task-filter="high" data-scope="all" data-focus="high">High</button>
+              <button class="filter-pill" type="button" data-task-filter="triage" data-scope="all" data-focus="triage">No metadata</button>
+            </div>
+            <div class="task-list" id="tasks-list">
+              <div class="empty-state">
+                <p class="empty-title">Tasks are waiting for the first index.</p>
+                <p>Rebuild the index from Dashboard.</p>
+              </div>
+            </div>
           </section>
         </section>
 
@@ -185,21 +202,98 @@
         <section class="tab-panel" data-tab-panel="dashboard" aria-label="Dashboard" hidden>
           <header class="top-bar">
             <div>
-              <p class="eyebrow">awareness layer · planned</p>
+              <p class="eyebrow">awareness layer · local index</p>
               <h1>Dashboard</h1>
             </div>
-            <div class="vault-pill"><span class="status-dot"></span><span>WIP</span></div>
+            <button class="secondary-button" id="index-run-button" type="button">Rebuild index</button>
           </header>
-          <section class="placeholder-view">
-            <article class="placeholder-card">
-              <p class="placeholder-kicker">Work in progress</p>
-              <h2>A compact overview will live here.</h2>
-              <p>Recent captures, active projects, prioritized tasks, and resurfaced notes can land here later.</p>
-            </article>
+          <section class="workspace-view">
+            <div class="index-grid" id="index-status">
+              <div class="empty-state">
+                <p class="empty-title">Checking index...</p>
+              </div>
+            </div>
+
+            <div class="overview-grid" id="dashboard-overview"></div>
+
+            <div class="dashboard-grid">
+              <section class="dashboard-section">
+                <h2>Recent captures</h2>
+                <div class="mini-list" id="dashboard-captures"></div>
+              </section>
+              <section class="dashboard-section">
+                <h2>High focus</h2>
+                <div class="mini-list" id="dashboard-focus-tasks"></div>
+              </section>
+              <section class="dashboard-section">
+                <h2>Due soon</h2>
+                <div class="mini-list" id="dashboard-due-soon"></div>
+              </section>
+              <section class="dashboard-section">
+                <h2>Needs triage</h2>
+                <div class="mini-list" id="dashboard-triage"></div>
+              </section>
+              <section class="dashboard-section dashboard-section-wide">
+                <h2>Recent notes</h2>
+                <div class="mini-list" id="dashboard-recent-notes"></div>
+              </section>
+            </div>
+
+            <form class="search-form" id="search-form">
+              <label class="sr-only" for="search-input">Search indexed notes</label>
+              <input id="search-input" type="search" placeholder="Search indexed notes..." autocomplete="off" />
+              <button class="secondary-button" type="submit">Search</button>
+            </form>
+
+            <div class="result-list" id="search-results">
+              <div class="empty-state">
+                <p class="empty-title">Recent notes will appear here.</p>
+                <p>Rebuild the index to populate search.</p>
+              </div>
+            </div>
           </section>
         </section>
       </section>
     </main>
+
+    <div class="todo-sheet" id="todo-sheet" hidden>
+      <button class="sheet-backdrop" type="button" aria-label="Close todo details" data-todo-cancel></button>
+      <section class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="todo-sheet-title">
+        <div class="sheet-header">
+          <div>
+            <p class="eyebrow">todo capture</p>
+            <h2 id="todo-sheet-title">Clarify the task</h2>
+          </div>
+          <button class="sheet-close" type="button" aria-label="Close todo details" data-todo-cancel>×</button>
+        </div>
+
+        <div class="todo-question">
+          <span>Important?</span>
+          <div class="choice-row" role="group" aria-label="Importance">
+            <button class="choice-button is-active" type="button" data-todo-important="true">Important</button>
+            <button class="choice-button" type="button" data-todo-important="false">Not important</button>
+          </div>
+        </div>
+
+        <div class="todo-question">
+          <span>Urgent?</span>
+          <div class="choice-row" role="group" aria-label="Urgency">
+            <button class="choice-button" type="button" data-todo-urgent="true">Urgent</button>
+            <button class="choice-button is-active" type="button" data-todo-urgent="false">Not urgent</button>
+          </div>
+        </div>
+
+        <label class="due-field" for="todo-due">
+          <span>Deadline</span>
+          <input id="todo-due" type="date" />
+        </label>
+
+        <div class="sheet-actions">
+          <button class="secondary-button" type="button" data-todo-cancel>Cancel</button>
+          <button class="primary-button" id="todo-confirm" type="button">Save todo</button>
+        </div>
+      </section>
+    </div>
 
     <script src="/app.js" type="module"></script>
   </body>

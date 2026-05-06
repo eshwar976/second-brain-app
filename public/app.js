@@ -16,7 +16,17 @@ const CATEGORY_ICONS = {
 
 const state = {
   category: "thought",
-  captures: []
+  captures: [],
+  indexStatus: null,
+  tasks: [],
+  tasksTotal: 0,
+  taskScope: "all",
+  taskFocus: "all",
+  dashboard: null,
+  searchResults: [],
+  pendingTodoText: "",
+  todoImportant: true,
+  todoUrgent: false
 };
 
 const timeline = document.querySelector("#timeline");
@@ -29,13 +39,34 @@ const sendButton = document.querySelector(".send-button");
 const chips = Array.from(document.querySelectorAll(".chip"));
 const navItems = Array.from(document.querySelectorAll(".nav-item"));
 const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
+const indexStatus = document.querySelector("#index-status");
+const indexRunButton = document.querySelector("#index-run-button");
+const searchForm = document.querySelector("#search-form");
+const searchInput = document.querySelector("#search-input");
+const searchResults = document.querySelector("#search-results");
+const tasksList = document.querySelector("#tasks-list");
+const tasksCount = document.querySelector("#tasks-count");
+const tasksRefreshButton = document.querySelector("#tasks-refresh-button");
+const taskFilterButtons = Array.from(document.querySelectorAll("[data-task-filter]"));
+const dashboardOverview = document.querySelector("#dashboard-overview");
+const dashboardCaptures = document.querySelector("#dashboard-captures");
+const dashboardFocusTasks = document.querySelector("#dashboard-focus-tasks");
+const dashboardDueSoon = document.querySelector("#dashboard-due-soon");
+const dashboardTriage = document.querySelector("#dashboard-triage");
+const dashboardRecentNotes = document.querySelector("#dashboard-recent-notes");
+const todoSheet = document.querySelector("#todo-sheet");
+const todoImportantButtons = Array.from(document.querySelectorAll("[data-todo-important]"));
+const todoUrgentButtons = Array.from(document.querySelectorAll("[data-todo-urgent]"));
+const todoDueInput = document.querySelector("#todo-due");
+const todoConfirmButton = document.querySelector("#todo-confirm");
+const todoCancelButtons = Array.from(document.querySelectorAll("[data-todo-cancel]"));
 
 init();
 
 async function init() {
   wireInteractions();
   await loadConfig();
-  await loadCaptures();
+  await Promise.all([loadCaptures(), loadIndexStatus()]);
   textarea.focus();
 }
 
@@ -69,7 +100,65 @@ function wireInteractions() {
     event.preventDefault();
     const text = textarea.value.trim();
     if (!text) return;
+    if (state.category === "todo") {
+      openTodoSheet(text);
+      return;
+    }
     await submitCapture(text);
+  });
+
+  todoImportantButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      state.todoImportant = button.dataset.todoImportant === "true";
+      renderTodoSheetState();
+    });
+  });
+
+  todoUrgentButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      state.todoUrgent = button.dataset.todoUrgent === "true";
+      renderTodoSheetState();
+    });
+  });
+
+  todoCancelButtons.forEach((button) => {
+    button.addEventListener("click", () => closeTodoSheet());
+  });
+
+  todoConfirmButton?.addEventListener("click", async () => {
+    await submitCapture(state.pendingTodoText, {
+      important: state.todoImportant,
+      urgent: state.todoUrgent,
+      due: todoDueInput?.value || ""
+    });
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && todoSheet && !todoSheet.hidden) {
+      closeTodoSheet();
+    }
+  });
+
+  indexRunButton?.addEventListener("click", async () => {
+    await rebuildIndex();
+  });
+
+  tasksRefreshButton?.addEventListener("click", async () => {
+    await loadTasks();
+  });
+
+  taskFilterButtons.forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.taskScope = button.dataset.scope || "all";
+      state.taskFocus = button.dataset.focus || "all";
+      renderTaskFilterState();
+      await loadTasks();
+    });
+  });
+
+  searchForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await runSearch();
   });
 }
 
@@ -88,10 +177,22 @@ function setActiveTab(tab) {
     const isActive = panel.dataset.tabPanel === tab;
     panel.classList.toggle("is-active", isActive);
     panel.hidden = !isActive;
+    if (isActive) {
+      panel.querySelector(".workspace-view")?.scrollTo({ top: 0, left: 0 });
+    }
   });
 
   if (tab === "capture") {
     textarea.focus();
+  }
+
+  if (tab === "dashboard") {
+    loadDashboard();
+    if (!state.searchResults.length) runSearch();
+  }
+
+  if (tab === "tasks") {
+    loadTasks();
   }
 }
 
@@ -116,17 +217,135 @@ async function loadCaptures() {
   }
 }
 
-async function submitCapture(text) {
+async function loadIndexStatus() {
+  try {
+    state.indexStatus = await getJson("/api/index/status");
+    renderIndexStatus();
+  } catch (error) {
+    renderIndexError(error.message);
+  }
+}
+
+async function loadTasks() {
+  if (tasksList) {
+    tasksList.innerHTML = `<div class="empty-state"><p class="empty-title">Loading tasks...</p></div>`;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      status: "open",
+      scope: state.taskScope,
+      focus: state.taskFocus
+    });
+    const data = await getJson(`/api/tasks?${params.toString()}`);
+    state.tasks = data.tasks || [];
+    state.tasksTotal = Number(data.totalCount || state.tasks.length);
+    renderTasks();
+  } catch (error) {
+    renderTasksError(error.message);
+  }
+}
+
+async function loadDashboard() {
+  renderDashboardLoading();
+  try {
+    state.dashboard = await getJson("/api/dashboard");
+    state.indexStatus = state.dashboard.index;
+    renderIndexStatus();
+    renderDashboard();
+  } catch (error) {
+    renderDashboardError(error.message);
+  }
+}
+
+async function rebuildIndex() {
+  indexRunButton.disabled = true;
+  indexRunButton.textContent = "Indexing...";
+  renderIndexMessage("Scanning vault Markdown and rebuilding the local cache.");
+
+  try {
+    const result = await postJson("/api/index/run", {});
+    state.indexStatus = {
+      ready: true,
+      noteCount: result.noteCount,
+      taskCount: result.taskCount,
+      openTaskCount: result.openTaskCount,
+      skippedCount: result.skippedCount,
+      durationMs: result.durationMs,
+      lastRunAt: result.ranAt,
+      dbPath: result.dbPath
+    };
+    renderIndexStatus();
+    await Promise.all([loadTasks(), runSearch(), loadDashboard()]);
+  } catch (error) {
+    renderIndexError(error.message);
+  } finally {
+    indexRunButton.disabled = false;
+    indexRunButton.textContent = "Rebuild index";
+  }
+}
+
+async function runSearch() {
+  const query = searchInput?.value.trim() || "";
+  if (searchResults) {
+    searchResults.innerHTML = `<div class="empty-state"><p class="empty-title">Searching...</p></div>`;
+  }
+
+  try {
+    const data = await getJson(`/api/notes/search?q=${encodeURIComponent(query)}`);
+    state.searchResults = data.results || [];
+    renderSearchResults(query);
+  } catch (error) {
+    renderSearchError(error.message);
+  }
+}
+
+function openTodoSheet(text) {
+  if (!todoSheet) return;
+  state.pendingTodoText = text;
+  state.todoImportant = true;
+  state.todoUrgent = false;
+  if (todoDueInput) todoDueInput.value = "";
+  renderTodoSheetState();
+  todoSheet.hidden = false;
+  document.body.classList.add("sheet-open");
+  requestAnimationFrame(() => todoConfirmButton?.focus());
+}
+
+function closeTodoSheet() {
+  if (!todoSheet) return;
+  todoSheet.hidden = true;
+  document.body.classList.remove("sheet-open");
+  state.pendingTodoText = "";
+  textarea.focus();
+}
+
+function renderTodoSheetState() {
+  todoImportantButtons.forEach((button) => {
+    const isActive = (button.dataset.todoImportant === "true") === state.todoImportant;
+    button.classList.toggle("is-active", isActive);
+  });
+
+  todoUrgentButtons.forEach((button) => {
+    const isActive = (button.dataset.todoUrgent === "true") === state.todoUrgent;
+    button.classList.toggle("is-active", isActive);
+  });
+}
+
+async function submitCapture(text, metadata = {}) {
   sendButton.disabled = true;
+  if (todoConfirmButton) todoConfirmButton.disabled = true;
 
   try {
     const result = await postJson("/api/captures", {
       category: state.category,
-      text
+      text,
+      ...metadata
     });
 
     textarea.value = "";
     autoResize(textarea);
+    if (todoSheet && !todoSheet.hidden) closeTodoSheet();
     await loadCaptures();
     flashHelper(`Appended to ${relativeMonthlyPath(result.monthlyFile)}`);
     textarea.focus();
@@ -134,6 +353,7 @@ async function submitCapture(text) {
     flashHelper(error.message);
   } finally {
     sendButton.disabled = false;
+    if (todoConfirmButton) todoConfirmButton.disabled = false;
   }
 }
 
@@ -155,10 +375,6 @@ function renderTimeline() {
     bubble.className = "capture-bubble";
     bubble.style.setProperty("--category-color", CATEGORY_COLORS[capture.category] || CATEGORY_COLORS.thought);
 
-    const text = capture.category === "todo" && capture.content
-      ? capture.content
-      : capture.text;
-
     bubble.innerHTML = `
       <div class="capture-meta">
         <span class="category-label">
@@ -167,7 +383,7 @@ function renderTimeline() {
         </span>
         <span>${escapeHtml(formatCaptureLabel(capture.label))}</span>
       </div>
-      <p class="capture-text">${escapeHtml(text)}</p>
+      <p class="capture-text">${escapeHtml(capture.text)}</p>
     `;
 
     timeline.appendChild(bubble);
@@ -176,6 +392,273 @@ function renderTimeline() {
   requestAnimationFrame(() => {
     timeline.scrollTop = timeline.scrollHeight;
   });
+}
+
+function renderIndexStatus() {
+  if (!indexStatus || !state.indexStatus) return;
+
+  const status = state.indexStatus;
+  const lastRun = status.lastRunAt ? formatDateTime(status.lastRunAt) : "Not indexed yet";
+  indexStatus.innerHTML = `
+    <div class="metric">
+      <span class="metric-value">${numberFormat(status.noteCount)}</span>
+      <span class="metric-label">Notes</span>
+    </div>
+    <div class="metric">
+      <span class="metric-value">${numberFormat(status.openTaskCount)}</span>
+      <span class="metric-label">Open tasks</span>
+    </div>
+    <div class="metric">
+      <span class="metric-value">${numberFormat(status.skippedCount)}</span>
+      <span class="metric-label">Skipped paths</span>
+    </div>
+    <p class="index-meta">Last indexed: ${escapeHtml(lastRun)}</p>
+  `;
+}
+
+function renderDashboard() {
+  if (!state.dashboard) return;
+  renderDashboardOverview(state.dashboard);
+  renderDashboardCaptures(state.dashboard.recentCaptures || []);
+  renderDashboardTaskList(dashboardFocusTasks, state.dashboard.highFocusTasks || [], "No high-focus tasks in the current index.");
+  renderDashboardTaskList(dashboardDueSoon, state.dashboard.dueSoonTasks || [], "No due-soon tasks in the current index.");
+  renderDashboardTaskList(dashboardTriage, state.dashboard.triageTasks || [], "No tasks need triage.");
+  renderDashboardRecentNotes(state.dashboard.recentNotes || []);
+}
+
+function renderDashboardOverview(data) {
+  if (!dashboardOverview) return;
+  const summary = data.taskSummary || {};
+  dashboardOverview.innerHTML = `
+    <article class="overview-tile">
+      <span class="overview-value">${numberFormat(summary.doNowCount)}</span>
+      <span class="overview-label">Do now</span>
+    </article>
+    <article class="overview-tile">
+      <span class="overview-value">${numberFormat(summary.scheduleCount)}</span>
+      <span class="overview-label">Schedule</span>
+    </article>
+    <article class="overview-tile">
+      <span class="overview-value">${numberFormat(summary.quickCount)}</span>
+      <span class="overview-label">Quick</span>
+    </article>
+    <article class="overview-tile">
+      <span class="overview-value">${numberFormat(summary.somedayCount)}</span>
+      <span class="overview-label">Someday</span>
+    </article>
+    <article class="overview-tile">
+      <span class="overview-value">${numberFormat(summary.dueSoonCount)}</span>
+      <span class="overview-label">Due soon</span>
+    </article>
+    <article class="overview-tile">
+      <span class="overview-value">${numberFormat(summary.highCount)}</span>
+      <span class="overview-label">High focus</span>
+    </article>
+    <article class="overview-tile">
+      <span class="overview-value">${numberFormat(summary.triageCount)}</span>
+      <span class="overview-label">Needs triage</span>
+    </article>
+    <article class="overview-tile">
+      <span class="overview-value">${numberFormat(summary.openCount)}</span>
+      <span class="overview-label">Open tasks</span>
+    </article>
+  `;
+}
+
+function renderDashboardCaptures(captures) {
+  if (!dashboardCaptures) return;
+  if (!captures.length) {
+    dashboardCaptures.innerHTML = `<p class="quiet-line">No recent captures yet.</p>`;
+    return;
+  }
+  dashboardCaptures.innerHTML = captures.map((capture) => `
+    <article class="mini-row">
+      <span class="mini-type mini-${escapeHtml(capture.category)}">${escapeHtml(capture.category)}</span>
+      <p>${escapeHtml(capture.text)}</p>
+      ${capture.category === "todo" ? renderTaskBadges(capture.metadata || {}) : ""}
+    </article>
+  `).join("");
+}
+
+function renderDashboardTaskList(target, tasks, emptyMessage) {
+  if (!target) return;
+  if (!tasks.length) {
+    target.innerHTML = `<p class="quiet-line">${escapeHtml(emptyMessage)}</p>`;
+    return;
+  }
+  target.innerHTML = tasks.map((task) => `
+    <article class="mini-row">
+      <span class="task-checkbox" aria-hidden="true"></span>
+      <p>${escapeHtml(task.text)}</p>
+      ${renderTaskBadges(task)}
+      <small>${escapeHtml(task.path)}:${task.lineNumber}</small>
+    </article>
+  `).join("");
+}
+
+function renderDashboardRecentNotes(notes) {
+  if (!dashboardRecentNotes) return;
+  if (!notes.length) {
+    dashboardRecentNotes.innerHTML = `<p class="quiet-line">No recent notes found.</p>`;
+    return;
+  }
+  dashboardRecentNotes.innerHTML = notes.map((note) => `
+    <article class="mini-row">
+      <p><strong>${escapeHtml(note.title)}</strong></p>
+      <small>${escapeHtml(note.path)}</small>
+    </article>
+  `).join("");
+}
+
+function renderDashboardLoading() {
+  [dashboardOverview, dashboardCaptures, dashboardFocusTasks, dashboardDueSoon, dashboardTriage, dashboardRecentNotes].forEach((target) => {
+    if (target) target.innerHTML = `<p class="quiet-line">Loading...</p>`;
+  });
+}
+
+function renderDashboardError(message) {
+  if (dashboardOverview) {
+    dashboardOverview.innerHTML = `
+      <div class="empty-state">
+        <p class="empty-title">Dashboard unavailable.</p>
+        <p>${escapeHtml(message)}</p>
+      </div>
+    `;
+  }
+}
+
+function renderIndexMessage(message) {
+  if (!indexStatus) return;
+  indexStatus.innerHTML = `
+    <div class="empty-state">
+      <p class="empty-title">${escapeHtml(message)}</p>
+    </div>
+  `;
+}
+
+function renderIndexError(message) {
+  if (!indexStatus) return;
+  indexStatus.innerHTML = `
+    <div class="empty-state">
+      <p class="empty-title">Index unavailable.</p>
+      <p>${escapeHtml(message)}</p>
+    </div>
+  `;
+}
+
+function renderSearchResults(query) {
+  if (!searchResults) return;
+
+  if (!state.searchResults.length) {
+    searchResults.innerHTML = `
+      <div class="empty-state">
+        <p class="empty-title">${query ? "No matches found." : "No indexed notes yet."}</p>
+        <p>${query ? "Try a different word or rebuild the index." : "Rebuild the index to populate recent notes."}</p>
+      </div>
+    `;
+    return;
+  }
+
+  searchResults.innerHTML = state.searchResults.map((note) => `
+    <article class="result-row">
+      <div>
+        <h2>${escapeHtml(note.title)}</h2>
+        <p>${escapeHtml(note.snippet)}</p>
+      </div>
+      <div class="result-meta">
+        <span>${escapeHtml(note.para || "note")}</span>
+        <span>${escapeHtml(note.path)}</span>
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderSearchError(message) {
+  if (!searchResults) return;
+  searchResults.innerHTML = `
+    <div class="empty-state">
+      <p class="empty-title">Search unavailable.</p>
+      <p>${escapeHtml(message)}</p>
+    </div>
+  `;
+}
+
+function renderTasks() {
+  if (!tasksList || !tasksCount) return;
+  tasksCount.textContent = `${state.tasksTotal} open`;
+  renderTaskFilterState();
+
+  if (!state.tasks.length) {
+    tasksList.innerHTML = `
+      <div class="empty-state">
+        <p class="empty-title">No open tasks found.</p>
+        <p>Rebuild the index after adding Markdown tasks.</p>
+      </div>
+    `;
+    return;
+  }
+
+  tasksList.innerHTML = state.tasks.map((task) => `
+    <article class="task-row">
+      <span class="task-checkbox" aria-hidden="true"></span>
+      <div class="task-main">
+        <p>${escapeHtml(task.text)}</p>
+        <div class="task-meta">
+          ${renderTaskBadges(task)}
+          ${task.project ? `<span>${escapeHtml(task.project)}</span>` : ""}
+          <span>${escapeHtml(task.path)}:${task.lineNumber}</span>
+        </div>
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderTaskBadges(task) {
+  const badges = [];
+  if (task.quadrant) badges.push({ label: formatQuadrant(task.quadrant), className: `task-badge-${task.quadrant}` });
+  if (task.important === true) badges.push({ label: "important", className: "task-badge-important" });
+  if (task.urgent === true) badges.push({ label: "urgent", className: "task-badge-urgent" });
+  if (task.priority) badges.push({ label: task.priority, className: `priority-${String(task.priority).toLowerCase()}` });
+  if (task.due) badges.push({ label: `due ${task.due}`, className: "task-badge-due" });
+  if (task.hasTodoMetadata === false || task.quadrant === "triage") badges.push({ label: "needs triage", className: "task-badge-triage" });
+
+  if (!badges.length) return "";
+
+  return `
+    <div class="task-badges">
+      ${badges.map((badge) => `
+        <span class="task-badge ${escapeHtml(badge.className)}">${escapeHtml(badge.label)}</span>
+      `).join("")}
+    </div>
+  `;
+}
+
+function formatQuadrant(value) {
+  return {
+    "do-now": "do now",
+    schedule: "schedule",
+    quick: "quick",
+    someday: "someday",
+    triage: "triage"
+  }[value] || value;
+}
+
+function renderTaskFilterState() {
+  taskFilterButtons.forEach((button) => {
+    const isActive = (button.dataset.scope || "all") === state.taskScope
+      && (button.dataset.focus || "all") === state.taskFocus;
+    button.classList.toggle("is-active", isActive);
+  });
+}
+
+function renderTasksError(message) {
+  if (!tasksList) return;
+  tasksList.innerHTML = `
+    <div class="empty-state">
+      <p class="empty-title">Could not load tasks.</p>
+      <p>${escapeHtml(message)}</p>
+    </div>
+  `;
 }
 
 function renderError(message) {
@@ -233,6 +716,20 @@ function formatCaptureLabel(label) {
   }
 
   return label;
+}
+
+function formatDateTime(value) {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  }).format(new Date(value));
+}
+
+function numberFormat(value) {
+  return new Intl.NumberFormat("en-US").format(Number(value || 0));
 }
 
 function escapeHtml(value) {
