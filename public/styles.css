@@ -24,6 +24,7 @@
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   overflow-x: hidden;
   background:
     linear-gradient(180deg, rgba(255, 252, 247, 0.74), rgba(247, 244, 238, 0.95)),
@@ -466,23 +467,43 @@ textarea::placeholder {
 }
 
 @media (max-width: 560px) {
+  html,
+  body {
+    width: 100%;
+    height: 100%;
+    min-height: 100svh;
+    min-height: 100dvh;
+    overflow: hidden;
+  }
+
   .top-bar {
     align-items: flex-start;
+    flex: 0 0 auto;
+    padding-top: max(14px, env(safe-area-inset-top));
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
   }
 
   .app-shell {
     display: block;
+    width: 100%;
+    max-width: 100%;
+    min-height: 100svh;
+    min-height: 100dvh;
+    height: 100svh;
+    height: 100dvh;
     padding: 0;
-    width: 100vw;
-    max-width: 100vw;
-    overflow-x: hidden;
+    overflow: hidden;
   }
 
   .capture-screen {
-    width: 100vw;
-    max-width: 100vw;
-    height: 100vh;
-    min-height: 100vh;
+    width: 100%;
+    max-width: 100%;
+    height: 100svh;
+    height: 100dvh;
+    min-height: 0;
+    max-height: 100svh;
+    max-height: 100dvh;
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) auto;
     border: 0;
@@ -494,8 +515,12 @@ textarea::placeholder {
     grid-row: 2;
     flex-direction: row;
     justify-content: space-around;
+    flex: 0 0 auto;
     gap: 2px;
-    padding: 6px 6px max(6px, env(safe-area-inset-bottom));
+    padding:
+      6px max(6px, env(safe-area-inset-right))
+      max(6px, env(safe-area-inset-bottom))
+      max(6px, env(safe-area-inset-left));
     border-right: 0;
     border-top: 1px solid rgba(221, 214, 204, 0.82);
   }
@@ -516,6 +541,19 @@ textarea::placeholder {
   .tab-panel {
     grid-row: 1;
     min-height: 0;
+    max-height: 100%;
+    overflow: hidden;
+  }
+
+  .timeline,
+  .placeholder-view {
+    min-height: 0;
+  }
+
+  .composer {
+    flex: 0 0 auto;
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
   }
 
   .chips {
