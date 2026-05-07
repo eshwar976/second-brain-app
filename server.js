@@ -14,11 +14,12 @@ const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || "3030");
 const VAULT_PATH = process.env.VAULT_PATH;
 const PUBLIC_DIR = path.join(__dirname, "public");
-const DATA_DIR = path.join(__dirname, ".data");
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, ".data");
 const DB_PATH = path.join(DATA_DIR, "index.sqlite");
 const SQLITE_BIN = process.env.SQLITE_BIN || "/usr/bin/sqlite3";
 const WATCH_DEBOUNCE_MS = Number(process.env.WATCH_DEBOUNCE_MS || "1200");
 const AUTO_INDEX_ON_START = process.env.AUTO_INDEX_ON_START !== "false";
+const APP_SECRET = process.env.APP_SECRET || "";
 const INDEX_IGNORE_FILE = process.env.INDEX_IGNORE_FILE
   ? path.resolve(__dirname, process.env.INDEX_IGNORE_FILE)
   : path.join(__dirname, ".second-brain-ignore");
@@ -73,12 +74,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/captures" && req.method === "POST") {
+      requireWriteAuth(req);
       const body = await readRequestJson(req);
       const capture = await appendCapture(body);
       return sendJson(res, 201, { capture, monthlyFile: getCurrentMonthlyCaptureFile() });
     }
 
     if (url.pathname === "/api/captures/update" && req.method === "POST") {
+      requireWriteAuth(req);
       const body = await readRequestJson(req);
       return sendJson(res, 200, await updateCapture(body));
     }
@@ -88,6 +91,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/index/run" && req.method === "POST") {
+      requireWriteAuth(req);
       return sendJson(res, 200, await runVaultIndex());
     }
 
@@ -104,22 +108,26 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/tasks" && req.method === "GET") {
       const status = url.searchParams.get("status") || "open";
       const scope = url.searchParams.get("scope") || "all";
+      const source = url.searchParams.get("source") || "all";
       const focus = url.searchParams.get("focus") || "all";
       const limit = Math.min(Number(url.searchParams.get("limit") || "100"), 200);
-      return sendJson(res, 200, await getTasks({ status, scope, focus, limit }));
+      return sendJson(res, 200, await getTasks({ status, scope, source, focus, limit }));
     }
 
     if (url.pathname === "/api/tasks/toggle" && req.method === "POST") {
+      requireWriteAuth(req);
       const body = await readRequestJson(req);
       return sendJson(res, 200, await toggleTask(body));
     }
 
     if (url.pathname === "/api/tasks/triage" && req.method === "POST") {
+      requireWriteAuth(req);
       const body = await readRequestJson(req);
       return sendJson(res, 200, await triageTask(body));
     }
 
     if (url.pathname === "/api/tasks/update" && req.method === "POST") {
+      requireWriteAuth(req);
       const body = await readRequestJson(req);
       return sendJson(res, 200, await updateTask(body));
     }
@@ -134,6 +142,24 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, status, { error: error.message || "Unexpected server error" });
   }
 });
+
+function requireWriteAuth(req) {
+  if (!APP_SECRET) return;
+  const header = req.headers["x-second-brain-secret"] || "";
+  const auth = req.headers.authorization || "";
+  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7) : "";
+  const provided = String(header || bearer || "");
+  if (!timingSafeEqual(provided, APP_SECRET)) {
+    throw httpError(401, "App passcode required.");
+  }
+}
+
+function timingSafeEqual(a, b) {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
 
 server.listen(PORT, HOST, () => {
   console.log(`Second Brain App running at http://${HOST}:${PORT}`);
@@ -184,18 +210,80 @@ async function getHealth() {
       lastRunAt: index.lastRunAt,
       dbPath: DB_PATH,
       watcher: index.watcher
+    },
+    security: {
+      authRequired: Boolean(APP_SECRET),
+      lanAccess: isLanBound(),
+      warning: getLanWarning()
     }
   };
 }
 
 async function getPublicConfig() {
+  const ignoreRules = await getIndexIgnoreRulePreview();
+  const backups = await getBackupState();
   return {
     appName: "Second Brain Capture",
     vaultName: path.basename(VAULT_PATH),
+    vaultPath: VAULT_PATH,
+    host: HOST,
+    port: PORT,
+    localUrl: `http://127.0.0.1:${PORT}`,
+    lanUrl: isLanBound() ? `http://<your-mac-ip>:${PORT}` : "",
+    lanAccess: isLanBound(),
+    authRequired: Boolean(APP_SECRET),
+    securityWarning: getLanWarning(),
     currentMonth: getCurrentMonthSlug(),
     monthlyFile: getCurrentMonthlyCaptureFile(),
+    targetFile: getCurrentMonthlyCaptureFile(),
+    ignoreRules,
+    backups,
     categories: Array.from(CAPTURE_CATEGORIES)
   };
+}
+
+async function getBackupState() {
+  const [app, vault] = await Promise.all([
+    getGitSummary(__dirname),
+    getGitSummary(VAULT_PATH)
+  ]);
+  return { app, vault };
+}
+
+async function getGitSummary(repoPath) {
+  const gitDir = path.join(repoPath, ".git");
+  if (!(await pathExists(gitDir))) {
+    return { available: false, path: repoPath, dirty: false, count: 0, summary: "not a git repo" };
+  }
+
+  try {
+    const output = await runProcess("git", ["-C", repoPath, "status", "--short"]);
+    const lines = output.split(/\r?\n/).filter(Boolean);
+    return {
+      available: true,
+      path: repoPath,
+      dirty: lines.length > 0,
+      count: lines.length,
+      summary: lines.length ? `${lines.length} uncommitted change${lines.length === 1 ? "" : "s"}` : "clean"
+    };
+  } catch (error) {
+    return { available: false, path: repoPath, dirty: false, count: 0, summary: error.message };
+  }
+}
+
+function isLanBound() {
+  return HOST === "0.0.0.0" || HOST === "::";
+}
+
+function getLanWarning() {
+  if (!isLanBound()) return "";
+  if (APP_SECRET) return "LAN access is enabled and write actions require the app passcode.";
+  return "LAN access is enabled without a passcode. Devices on your network can write to this vault.";
+}
+
+async function getIndexIgnoreRulePreview() {
+  await loadIndexIgnoreRules();
+  return [...indexIgnoreRules];
 }
 
 async function ensureIndexSchema() {
@@ -558,10 +646,11 @@ async function getDashboard() {
   };
 }
 
-async function getTasks({ status = "open", scope = "all", focus = "all", limit = 100 } = {}) {
+async function getTasks({ status = "open", scope = "all", source = "all", focus = "all", limit = 100 } = {}) {
   await ensureIndexSchema();
   const normalizedStatus = ["open", "done", "all"].includes(status) ? status : "open";
   const normalizedScope = ["all", "work", "personal"].includes(scope) ? scope : "all";
+  const normalizedSource = ["all", "fleeting", "projects", "areas"].includes(source) ? source : "all";
   const normalizedFocus = [
     "all",
     "due",
@@ -573,7 +662,7 @@ async function getTasks({ status = "open", scope = "all", focus = "all", limit =
     "someday",
     "triage"
   ].includes(focus) ? focus : "all";
-  const whereClause = buildTaskWhereClause({ status: normalizedStatus, scope: normalizedScope, focus: normalizedFocus });
+  const whereClause = buildTaskWhereClause({ status: normalizedStatus, scope: normalizedScope, source: normalizedSource, focus: normalizedFocus });
   const countRows = await dbQuery(`
     SELECT COUNT(*) AS total_count
     FROM tasks
@@ -594,6 +683,7 @@ async function getTasks({ status = "open", scope = "all", focus = "all", limit =
   return {
     status: normalizedStatus,
     scope: normalizedScope,
+    source: normalizedSource,
     focus: normalizedFocus,
     totalCount: Number(countRows[0]?.total_count || 0),
     limit: Number(limit),
@@ -797,7 +887,7 @@ function replaceTaskTextInLine(line, text) {
   ];
 }
 
-function buildTaskWhereClause({ status, scope, focus }) {
+function buildTaskWhereClause({ status, scope, source, focus }) {
   const clauses = [];
   const dueSoonCutoff = formatDate(addDays(new Date(), 7));
   if (status !== "all") clauses.push(`status = ${sqlValue(status)}`);
@@ -807,6 +897,9 @@ function buildTaskWhereClause({ status, scope, focus }) {
   if (scope === "personal") {
     clauses.push(`(path LIKE '2.Areas/Personal/%' OR path LIKE '1.Projects/columbus/%')`);
   }
+  if (source === "fleeting") clauses.push(`path LIKE '2.Areas/Personal/fleeting/%'`);
+  if (source === "projects") clauses.push(`path LIKE '1.Projects/%'`);
+  if (source === "areas") clauses.push(`path LIKE '2.Areas/%'`);
   if (focus === "due") clauses.push(`COALESCE(due, '') <> ''`);
   if (focus === "due-soon") {
     clauses.push(`COALESCE(due, '') <> '' AND date(due) <= date(${sqlValue(dueSoonCutoff)})`);
@@ -1527,6 +1620,25 @@ function runSqlite(sql, { json = false } = {}) {
       }
     });
     child.stdin.end(sql);
+  });
+}
+
+function runProcess(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(stderr.trim() || `${command} exited with code ${code}`));
+    });
   });
 }
 

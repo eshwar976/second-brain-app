@@ -36,9 +36,12 @@ HOST=127.0.0.1
 PORT=3030
 WATCH_DEBOUNCE_MS=1200
 AUTO_INDEX_ON_START=true
+APP_SECRET=
 INDEX_IGNORE=
 INDEX_IGNORE_FILE=.second-brain-ignore
 ```
+
+Set `APP_SECRET` when binding to `0.0.0.0`. When present, write actions require the passcode in the web app before they can append, edit, triage, toggle, or rebuild.
 
 ## Ignore Rules
 
@@ -64,6 +67,8 @@ Simple `*` wildcards are supported. Ignored paths are excluded from search, task
 - `GET /api/tasks?status=open&scope=all|work|personal&focus=all|due|due-soon|high|do-now|schedule|quick|someday|triage`
 - `POST /api/tasks/toggle`
 - `POST /api/tasks/triage`
+- `POST /api/tasks/update`
+- `POST /api/captures/update`
 
 Example capture:
 

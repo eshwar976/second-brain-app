@@ -1,0 +1,18 @@
+{
+  "name": "Second Brain",
+  "short_name": "Second Brain",
+  "description": "Local-first capture and task surface for an Obsidian vault.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f4ee",
+  "theme_color": "#5f7f65",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

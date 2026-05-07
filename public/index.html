@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Second Brain Capture</title>
+    <meta name="theme-color" content="#f7f4ee" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <script>
       (() => {
         try {
@@ -91,9 +93,15 @@
               <p class="eyebrow">fleeting · <span id="current-month">loading</span></p>
               <h1>Capture</h1>
             </div>
-            <div class="vault-pill" aria-live="polite">
-              <span class="status-dot"></span>
-              <span id="vault-name">vault</span>
+            <div class="top-actions">
+              <div class="capture-view-toggle" role="group" aria-label="Capture timeline view">
+                <button class="view-option is-active" type="button" data-capture-view="today">Today</button>
+                <button class="view-option" type="button" data-capture-view="month">Month</button>
+              </div>
+              <div class="vault-pill" aria-live="polite">
+                <span class="status-dot"></span>
+                <span id="vault-name">vault</span>
+              </div>
             </div>
           </header>
 
@@ -139,7 +147,7 @@
               </button>
             </div>
 
-            <p class="helper-line" id="helper-line">Append to fleeting/YYYY-MM.md</p>
+            <p class="helper-line" id="helper-line"></p>
           </form>
         </section>
 
@@ -174,20 +182,51 @@
           <section class="workspace-view">
             <div class="view-toolbar">
               <p>Open Markdown tasks from the indexed vault.</p>
-              <button class="secondary-button" id="tasks-refresh-button" type="button">Refresh</button>
+              <div class="toolbar-actions">
+                <button class="secondary-button" id="tasks-refresh-button" type="button">Refresh</button>
+              </div>
             </div>
-            <div class="filter-strip" aria-label="Task filters">
-              <button class="filter-pill is-active" type="button" data-task-filter="all" data-scope="all" data-focus="all">All</button>
-              <button class="filter-pill" type="button" data-task-filter="do-now" data-scope="all" data-focus="do-now">Do now</button>
-              <button class="filter-pill" type="button" data-task-filter="schedule" data-scope="all" data-focus="schedule">Schedule</button>
-              <button class="filter-pill" type="button" data-task-filter="quick" data-scope="all" data-focus="quick">Quick</button>
-              <button class="filter-pill" type="button" data-task-filter="someday" data-scope="all" data-focus="someday">Someday</button>
-              <button class="filter-pill" type="button" data-task-filter="work" data-scope="work" data-focus="all">Work</button>
-              <button class="filter-pill" type="button" data-task-filter="personal" data-scope="personal" data-focus="all">Personal</button>
-              <button class="filter-pill" type="button" data-task-filter="due" data-scope="all" data-focus="due">Due</button>
-              <button class="filter-pill" type="button" data-task-filter="due-soon" data-scope="all" data-focus="due-soon">Due soon</button>
-              <button class="filter-pill" type="button" data-task-filter="high" data-scope="all" data-focus="high">High</button>
-              <button class="filter-pill" type="button" data-task-filter="triage" data-scope="all" data-focus="triage">No metadata</button>
+            <div class="task-filter-panel" aria-label="Task filters">
+              <label class="filter-field">
+                <span>Status</span>
+                <select id="task-status-filter">
+                  <option value="open">Open</option>
+                  <option value="done">Done</option>
+                  <option value="all">All</option>
+                </select>
+              </label>
+              <label class="filter-field">
+                <span>Focus</span>
+                <select id="task-focus-filter">
+                  <option value="all">All</option>
+                  <option value="do-now">Do now</option>
+                  <option value="schedule">Schedule</option>
+                  <option value="quick">Quick</option>
+                  <option value="someday">Someday</option>
+                  <option value="due">Has due date</option>
+                  <option value="due-soon">Due soon</option>
+                  <option value="high">High focus</option>
+                  <option value="triage">No metadata</option>
+                </select>
+              </label>
+              <label class="filter-field">
+                <span>Scope</span>
+                <select id="task-scope-filter">
+                  <option value="all">All</option>
+                  <option value="work">Work</option>
+                  <option value="personal">Personal</option>
+                </select>
+              </label>
+              <label class="filter-field">
+                <span>Source</span>
+                <select id="task-source-filter">
+                  <option value="all">All</option>
+                  <option value="fleeting">Fleeting</option>
+                  <option value="projects">Projects</option>
+                  <option value="areas">Areas</option>
+                </select>
+              </label>
+              <button class="secondary-button filter-clear-button" id="task-filter-clear" type="button">Clear</button>
             </div>
             <div class="task-list" id="tasks-list">
               <div class="empty-state">
@@ -258,6 +297,7 @@
                   <h2>Settings</h2>
                   <span id="theme-status">System</span>
                 </div>
+                <p class="warning-line" id="auth-warning" hidden></p>
                 <div class="setting-row">
                   <div>
                     <p class="setting-title">Appearance</p>
@@ -269,6 +309,7 @@
                     <button class="theme-option" type="button" data-theme-choice="dark">Dark</button>
                   </div>
                 </div>
+                <div id="settings-details"></div>
               </section>
             </div>
 
@@ -320,6 +361,10 @@
           <span>Deadline</span>
           <input id="todo-due" type="date" />
         </label>
+        <div class="due-presets" aria-label="Deadline presets">
+          <button class="choice-button" type="button" data-due-preset="today">Today</button>
+          <button class="choice-button" type="button" data-due-preset="tomorrow">Tomorrow</button>
+        </div>
 
         <div class="sheet-actions">
           <button class="secondary-button" type="button" data-todo-cancel>Cancel</button>
@@ -350,6 +395,33 @@
         </div>
       </section>
     </div>
+
+    <div class="todo-sheet" id="auth-sheet" hidden>
+      <button class="sheet-backdrop" type="button" aria-label="Close passcode" data-auth-cancel></button>
+      <section class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="auth-sheet-title">
+        <div class="sheet-header">
+          <div>
+            <p class="eyebrow">local security</p>
+            <h2 id="auth-sheet-title">App passcode</h2>
+          </div>
+          <button class="sheet-close" type="button" aria-label="Close passcode" data-auth-cancel>×</button>
+        </div>
+
+        <label class="due-field" for="auth-secret">
+          <span>Passcode</span>
+          <input id="auth-secret" type="password" autocomplete="current-password" />
+        </label>
+
+        <p class="quiet-line">Stored only in this browser and sent with write actions.</p>
+
+        <div class="sheet-actions">
+          <button class="secondary-button" type="button" data-auth-cancel>Cancel</button>
+          <button class="primary-button" id="auth-confirm" type="button">Save passcode</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="toast" id="action-toast" role="status" aria-live="polite" hidden></div>
 
     <script src="/app.js" type="module"></script>
   </body>

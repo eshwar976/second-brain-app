@@ -14,8 +14,10 @@ const CATEGORY_ICONS = {
   reflection: "icon-reflection"
 };
 
-const TASK_COMPLETE_EXIT_MS = 700;
+const TASK_COMPLETE_EXIT_MS = 500;
+const TASK_UNDO_TOAST_MS = 5200;
 const THEME_STORAGE_KEY = "secondBrain.theme";
+const APP_SECRET_STORAGE_KEY = "secondBrain.appSecret";
 const THEME_CHOICES = new Set(["system", "light", "dark"]);
 const systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -25,9 +27,13 @@ const state = {
   indexStatus: null,
   tasks: [],
   tasksTotal: 0,
+  taskStatus: "open",
   taskScope: "all",
+  taskSource: "all",
   taskFocus: "all",
+  captureView: "today",
   dashboard: null,
+  config: null,
   searchResults: [],
   pendingTodoText: "",
   pendingTriageTask: null,
@@ -35,7 +41,10 @@ const state = {
   todoSheetMode: "capture",
   todoImportant: true,
   todoUrgent: false,
-  themePreference: "system"
+  captureSaving: false,
+  authSecret: "",
+  themePreference: "system",
+  toastTimer: null
 };
 
 const timeline = document.querySelector("#timeline");
@@ -56,7 +65,12 @@ const searchResults = document.querySelector("#search-results");
 const tasksList = document.querySelector("#tasks-list");
 const tasksCount = document.querySelector("#tasks-count");
 const tasksRefreshButton = document.querySelector("#tasks-refresh-button");
-const taskFilterButtons = Array.from(document.querySelectorAll("[data-task-filter]"));
+const taskStatusFilter = document.querySelector("#task-status-filter");
+const taskFocusFilter = document.querySelector("#task-focus-filter");
+const taskScopeFilter = document.querySelector("#task-scope-filter");
+const taskSourceFilter = document.querySelector("#task-source-filter");
+const taskFilterClearButton = document.querySelector("#task-filter-clear");
+const captureViewButtons = Array.from(document.querySelectorAll("[data-capture-view]"));
 const dashboardOverview = document.querySelector("#dashboard-overview");
 const dashboardCaptures = document.querySelector("#dashboard-captures");
 const dashboardFocusTasks = document.querySelector("#dashboard-focus-tasks");
@@ -68,23 +82,33 @@ const todoSheetKicker = todoSheet?.querySelector(".sheet-header .eyebrow");
 const todoSheetTitle = document.querySelector("#todo-sheet-title");
 const todoImportantButtons = Array.from(document.querySelectorAll("[data-todo-important]"));
 const todoUrgentButtons = Array.from(document.querySelectorAll("[data-todo-urgent]"));
+const duePresetButtons = Array.from(document.querySelectorAll("[data-due-preset]"));
 const todoDueInput = document.querySelector("#todo-due");
 const todoConfirmButton = document.querySelector("#todo-confirm");
 const todoCancelButtons = Array.from(document.querySelectorAll("[data-todo-cancel]"));
 const themeButtons = Array.from(document.querySelectorAll("[data-theme-choice]"));
 const themeStatus = document.querySelector("#theme-status");
+const settingsDetails = document.querySelector("#settings-details");
+const authWarning = document.querySelector("#auth-warning");
+const authSheet = document.querySelector("#auth-sheet");
+const authInput = document.querySelector("#auth-secret");
+const authConfirmButton = document.querySelector("#auth-confirm");
+const authCancelButtons = Array.from(document.querySelectorAll("[data-auth-cancel]"));
 const editSheet = document.querySelector("#edit-sheet");
 const editSheetKicker = document.querySelector("#edit-sheet-kicker");
 const editSheetTitle = document.querySelector("#edit-sheet-title");
 const editText = document.querySelector("#edit-text");
 const editConfirmButton = document.querySelector("#edit-confirm");
 const editCancelButtons = Array.from(document.querySelectorAll("[data-edit-cancel]"));
+const actionToast = document.querySelector("#action-toast");
 
 init();
 
 async function init() {
   initTheme();
+  initAuth();
   wireInteractions();
+  registerServiceWorker();
   await loadConfig();
   await Promise.all([loadCaptures(), loadIndexStatus()]);
   textarea.focus();
@@ -145,12 +169,24 @@ function wireInteractions() {
     });
   });
 
+  duePresetButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setDuePreset(button.dataset.duePreset || "none");
+    });
+  });
+
+  todoDueInput?.addEventListener("change", renderTodoSheetState);
+
   todoCancelButtons.forEach((button) => {
     button.addEventListener("click", () => closeTodoSheet());
   });
 
   editCancelButtons.forEach((button) => {
     button.addEventListener("click", () => closeEditSheet());
+  });
+
+  authCancelButtons.forEach((button) => {
+    button.addEventListener("click", () => closeAuthSheet());
   });
 
   themeButtons.forEach((button) => {
@@ -177,9 +213,24 @@ function wireInteractions() {
     await submitEdit();
   });
 
+  authConfirmButton?.addEventListener("click", () => {
+    saveAuthSecret();
+  });
+
+  authInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveAuthSecret();
+    }
+  });
+
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && editSheet && !editSheet.hidden) {
       closeEditSheet();
+      return;
+    }
+    if (event.key === "Escape" && authSheet && !authSheet.hidden) {
+      closeAuthSheet();
       return;
     }
     if (event.key === "Escape" && todoSheet && !todoSheet.hidden) {
@@ -195,6 +246,14 @@ function wireInteractions() {
     await loadTasks();
   });
 
+  actionToast?.addEventListener("click", async (event) => {
+    const undoButton = event.target.closest("[data-undo-task]");
+    if (!undoButton) return;
+    event.preventDefault();
+    await toggleTaskStatus(undoButton.dataset.undoTask, "open", { showUndo: false });
+    hideToast();
+  });
+
   tasksList?.addEventListener("click", handleTaskActionClick);
   tasksList?.addEventListener("dblclick", handleTaskEditDoubleClick);
   timeline?.addEventListener("dblclick", handleCaptureEditDoubleClick);
@@ -203,12 +262,25 @@ function wireInteractions() {
     target?.addEventListener("dblclick", handleTaskEditDoubleClick);
   });
 
-  taskFilterButtons.forEach((button) => {
-    button.addEventListener("click", async () => {
-      state.taskScope = button.dataset.scope || "all";
-      state.taskFocus = button.dataset.focus || "all";
+  [taskStatusFilter, taskFocusFilter, taskScopeFilter, taskSourceFilter].forEach((select) => {
+    select?.addEventListener("change", async () => {
+      readTaskFiltersFromControls();
       renderTaskFilterState();
       await loadTasks();
+    });
+  });
+
+  taskFilterClearButton?.addEventListener("click", async () => {
+    resetTaskFilters();
+    renderTaskFilterState();
+    await loadTasks();
+  });
+
+  captureViewButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      state.captureView = button.dataset.captureView || "today";
+      renderCaptureViewState();
+      renderTimeline();
     });
   });
 
@@ -225,6 +297,54 @@ function wireInteractions() {
     event.preventDefault();
     await runSearch();
   });
+}
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("/sw.js").catch(() => {
+    // PWA install support is a convenience; the app should stay quiet if registration is blocked.
+  });
+}
+
+function initAuth() {
+  try {
+    state.authSecret = window.localStorage.getItem(APP_SECRET_STORAGE_KEY) || "";
+  } catch {
+    state.authSecret = "";
+  }
+}
+
+function saveAuthSecret() {
+  const secret = authInput?.value.trim() || "";
+  state.authSecret = secret;
+  try {
+    if (secret) {
+      window.localStorage.setItem(APP_SECRET_STORAGE_KEY, secret);
+    } else {
+      window.localStorage.removeItem(APP_SECRET_STORAGE_KEY);
+    }
+  } catch {
+    // Secret still applies for this page even if storage is blocked.
+  }
+  closeAuthSheet();
+  flashHelper(secret ? "Passcode saved locally." : "Passcode cleared.");
+}
+
+function openAuthSheet() {
+  if (!authSheet || !authInput) return;
+  authInput.value = state.authSecret || "";
+  authSheet.hidden = false;
+  document.body.classList.add("sheet-open");
+  requestAnimationFrame(() => {
+    authInput.focus();
+    authInput.select();
+  });
+}
+
+function closeAuthSheet() {
+  if (!authSheet) return;
+  authSheet.hidden = true;
+  document.body.classList.remove("sheet-open");
 }
 
 function initTheme() {
@@ -332,6 +452,8 @@ function setActiveTab(tab) {
 function openTaskView({ scope = "all", focus = "all" } = {}) {
   state.taskScope = scope;
   state.taskFocus = focus;
+  state.taskStatus = "open";
+  state.taskSource = "all";
   setActiveTab("tasks");
   renderTaskFilterState();
 }
@@ -339,12 +461,80 @@ function openTaskView({ scope = "all", focus = "all" } = {}) {
 async function loadConfig() {
   try {
     const config = await getJson("/api/config/public");
+    state.config = config;
     vaultName.textContent = config.vaultName;
     currentMonth.textContent = config.currentMonth;
-    helperLine.textContent = `Append to ${relativeMonthlyPath(config.monthlyFile)}`;
+    helperLine.textContent = "";
+    renderSettingsDetails(config);
   } catch (error) {
     helperLine.textContent = error.message;
   }
+}
+
+function renderSettingsDetails(config) {
+  if (authWarning) {
+    authWarning.hidden = !config.securityWarning;
+    authWarning.textContent = config.securityWarning || "";
+    authWarning.classList.toggle("is-danger", config.lanAccess && !config.authRequired);
+  }
+
+  if (!settingsDetails) return;
+  const ignoreCount = Array.isArray(config.ignoreRules) ? config.ignoreRules.length : 0;
+  const ignoreList = Array.isArray(config.ignoreRules) && config.ignoreRules.length
+    ? `
+      <details class="settings-ignore">
+        <summary>Ignored paths <span>${numberFormat(ignoreCount)}</span></summary>
+        <ul>
+          ${config.ignoreRules.map((rule) => `<li>${escapeHtml(rule)}</li>`).join("")}
+        </ul>
+      </details>
+    `
+    : "";
+  const backupItems = config.backups ? [
+    ["Vault Git", config.backups.vault],
+    ["App Git", config.backups.app]
+  ] : [];
+  const backupWarning = backupItems.find(([, item]) => item?.dirty);
+  const backupGrid = backupItems.length ? `
+    <div class="settings-grid backup-grid">
+      ${backupItems.map(([label, item]) => `
+        <div class="${item?.dirty ? "is-warning" : ""}">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(item?.summary || "unknown")}</strong>
+        </div>
+      `).join("")}
+    </div>
+  ` : "";
+  settingsDetails.innerHTML = `
+    <div class="settings-grid">
+      <div><span>Vault</span><strong>${escapeHtml(config.vaultName)}</strong></div>
+      <div><span>Target file</span><strong>${escapeHtml(relativeMonthlyPath(config.targetFile || config.monthlyFile))}</strong></div>
+      <div><span>Host</span><strong>${escapeHtml(config.host)}:${escapeHtml(config.port)}</strong></div>
+      <div><span>Local URL</span><strong>${escapeHtml(config.localUrl)}</strong></div>
+      <div><span>LAN URL</span><strong>${escapeHtml(config.lanUrl || "disabled")}</strong></div>
+      <div><span>Write auth</span><strong>${config.authRequired ? "enabled" : "not set"}</strong></div>
+      <div><span>Ignored paths</span><strong>${numberFormat(ignoreCount)}</strong></div>
+    </div>
+    ${backupWarning ? `<p class="warning-line">Backup reminder: ${escapeHtml(backupWarning[0])} has ${escapeHtml(backupWarning[1].summary)}.</p>` : ""}
+    ${backupGrid}
+    ${ignoreList}
+    <div class="settings-actions">
+      ${config.authRequired ? `
+        <button class="secondary-button" type="button" data-auth-open>Set/reset app passcode</button>
+        <button class="secondary-button" type="button" data-auth-clear>Clear saved passcode</button>
+      ` : ""}
+    </div>
+  `;
+  settingsDetails.querySelector("[data-auth-open]")?.addEventListener("click", openAuthSheet);
+  settingsDetails.querySelector("[data-auth-clear]")?.addEventListener("click", () => {
+    state.authSecret = "";
+    try {
+      window.localStorage.removeItem(APP_SECRET_STORAGE_KEY);
+    } catch {
+      // Nothing else to clear.
+    }
+    flashHelper("Saved passcode cleared from this browser.");
+  });
 }
 
 async function loadCaptures() {
@@ -376,8 +566,9 @@ async function loadTasks() {
 
   try {
     const params = new URLSearchParams({
-      status: "open",
+      status: state.taskStatus,
       scope: state.taskScope,
+      source: state.taskSource,
       focus: state.taskFocus
     });
     const data = await getJson(`/api/tasks?${params.toString()}`);
@@ -460,6 +651,16 @@ function openTodoSheet({ mode = "capture", text = "", task = null } = {}) {
   requestAnimationFrame(() => todoConfirmButton?.focus());
 }
 
+function setDuePreset(preset) {
+  if (!todoDueInput) return;
+  if (preset === "today") {
+    todoDueInput.value = getLocalDateSlug();
+  } else if (preset === "tomorrow") {
+    todoDueInput.value = getLocalDateSlug(addDays(new Date(), 1));
+  }
+  renderTodoSheetState();
+}
+
 function closeTodoSheet() {
   if (!todoSheet) return;
   todoSheet.hidden = true;
@@ -483,11 +684,18 @@ function renderTodoSheetState() {
     const isActive = (button.dataset.todoUrgent === "true") === state.todoUrgent;
     button.classList.toggle("is-active", isActive);
   });
+
+  duePresetButtons.forEach((button) => {
+    button.classList.toggle("is-active", getDuePresetForValue(todoDueInput?.value || "") === button.dataset.duePreset);
+  });
 }
 
 async function submitCapture(text, metadata = {}) {
+  if (state.captureSaving) return;
+  state.captureSaving = true;
   sendButton.disabled = true;
   if (todoConfirmButton) todoConfirmButton.disabled = true;
+  helperLine.textContent = "Saving...";
 
   try {
     const result = await postJson("/api/captures", {
@@ -500,11 +708,12 @@ async function submitCapture(text, metadata = {}) {
     autoResize(textarea);
     if (todoSheet && !todoSheet.hidden) closeTodoSheet();
     await loadCaptures();
-    flashHelper(`Appended to ${relativeMonthlyPath(result.monthlyFile)}`);
+    flashHelper(`Saved to ${relativeMonthlyPath(result.monthlyFile)}`);
     textarea.focus();
   } catch (error) {
     flashHelper(error.message);
   } finally {
+    state.captureSaving = false;
     sendButton.disabled = false;
     if (todoConfirmButton) todoConfirmButton.disabled = false;
   }
@@ -529,11 +738,20 @@ async function submitTaskTriage(metadata = {}) {
 }
 
 async function handleTaskActionClick(event) {
+  const openButton = event.target.closest("[data-open-obsidian]");
+  if (openButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const task = findTaskById(openButton.dataset.openObsidian);
+    if (task) window.location.href = getObsidianTaskUrl(task);
+    return;
+  }
+
   const toggleButton = event.target.closest("[data-task-toggle]");
   if (toggleButton) {
     event.preventDefault();
     event.stopPropagation();
-    await toggleTaskDone(toggleButton.dataset.taskToggle);
+    await toggleTaskStatus(toggleButton.dataset.taskToggle, toggleButton.dataset.taskStatus || "done");
     return;
   }
 
@@ -555,7 +773,7 @@ function handleCaptureEditDoubleClick(event) {
 
 function handleTaskEditDoubleClick(event) {
   const row = event.target.closest("[data-task-id]");
-  if (!row || event.target.closest("button")) return;
+  if (!row || event.target.closest("button, a")) return;
   const task = findTaskById(row.dataset.taskId);
   if (task) openEditSheet({ kind: "task", item: task });
 }
@@ -620,27 +838,32 @@ async function submitEdit() {
   }
 }
 
-async function toggleTaskDone(taskId) {
+async function toggleTaskStatus(taskId, nextStatus = "done", { showUndo = true } = {}) {
   if (!taskId) return;
   const buttons = Array.from(document.querySelectorAll(`[data-task-toggle="${cssEscape(taskId)}"]`));
   const rows = getTaskRowsForButtons(buttons);
   buttons.forEach((button) => {
     button.disabled = true;
-    button.setAttribute("aria-label", "Task completed");
+    button.setAttribute("aria-label", nextStatus === "done" ? "Task completed" : "Task reopened");
   });
-  markTaskRowsCompleting(rows, true);
+  markTaskRowsCompleting(rows, nextStatus === "done");
 
   try {
-    await postJson("/api/tasks/toggle", { taskId, status: "done" });
-    await delay(TASK_COMPLETE_EXIT_MS);
+    await postJson("/api/tasks/toggle", { taskId, status: nextStatus });
+    if (nextStatus === "done") await delay(TASK_COMPLETE_EXIT_MS);
     await refreshTaskSurfaces();
+    if (nextStatus === "done" && showUndo) {
+      showUndoToast(taskId);
+    } else {
+      flashHelper(nextStatus === "done" ? "Marked done." : "Reopened task.");
+    }
   } catch (error) {
     markTaskRowsCompleting(rows, false);
     flashHelper(error.message);
   } finally {
     buttons.forEach((button) => {
       button.disabled = false;
-      button.setAttribute("aria-label", "Mark task done");
+      button.setAttribute("aria-label", nextStatus === "done" ? "Mark task done" : "Mark task open");
     });
   }
 }
@@ -674,8 +897,15 @@ function findTaskById(taskId) {
   return lists.flat().find((task) => task.id === taskId) || null;
 }
 
+function getObsidianTaskUrl(task) {
+  const vault = state.config?.vaultName || "";
+  const file = String(task.path || "").replace(/\.md$/i, "");
+  return `obsidian://open?vault=${encodeURIComponent(vault)}&file=${encodeURIComponent(file)}`;
+}
+
 function renderTimeline() {
   timeline.innerHTML = "";
+  renderCaptureViewState();
 
   if (!state.captures.length) {
     timeline.innerHTML = `
@@ -687,30 +917,91 @@ function renderTimeline() {
     return;
   }
 
-  for (const capture of [...state.captures].reverse()) {
-    const bubble = document.createElement("article");
-    bubble.className = "capture-bubble";
-    bubble.dataset.captureId = capture.clientId;
-    bubble.title = "Double-click to edit";
-    bubble.style.setProperty("--category-color", CATEGORY_COLORS[capture.category] || CATEGORY_COLORS.thought);
+  const ordered = [...state.captures].reverse();
+  const today = getLocalDateSlug();
+  const todaysCaptures = ordered.filter((capture) => getCaptureDay(capture) === today);
+  const olderCaptures = ordered.filter((capture) => getCaptureDay(capture) !== today);
 
-    bubble.innerHTML = `
-      <div class="capture-meta">
-        <span class="category-label">
-          <svg aria-hidden="true"><use href="#${CATEGORY_ICONS[capture.category] || CATEGORY_ICONS.thought}"></use></svg>
-          ${escapeHtml(capture.category)}
-        </span>
-        <span>${escapeHtml(formatCaptureLabel(capture.label))}</span>
-      </div>
-      <p class="capture-text">${escapeHtml(capture.text)}</p>
-    `;
+  if (state.captureView === "month" && olderCaptures.length) {
+    const older = document.createElement("details");
+    older.className = "capture-day capture-older";
+    older.innerHTML = `<summary>Older this month <span>${olderCaptures.length}</span></summary>`;
+    older.open = !todaysCaptures.length;
+    appendCaptureGroups(older, olderCaptures);
+    timeline.appendChild(older);
+  }
 
-    timeline.appendChild(bubble);
+  if (todaysCaptures.length) {
+    appendDayDivider(timeline, "Today");
+    todaysCaptures.forEach((capture) => timeline.appendChild(renderCaptureBubble(capture)));
+  } else if (olderCaptures.length) {
+    appendDayDivider(timeline, "Today");
+    const empty = document.createElement("p");
+    empty.className = "quiet-line today-empty";
+    empty.textContent = state.captureView === "month"
+      ? "No captures yet today."
+      : "No captures yet today. Switch to Month to see older entries.";
+    timeline.appendChild(empty);
   }
 
   requestAnimationFrame(() => {
     timeline.scrollTop = timeline.scrollHeight;
   });
+}
+
+function renderCaptureViewState() {
+  captureViewButtons.forEach((button) => {
+    const isActive = (button.dataset.captureView || "today") === state.captureView;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
+}
+
+function appendCaptureGroups(target, captures) {
+  let currentDay = "";
+  for (const capture of captures) {
+    const day = getCaptureDay(capture);
+    if (day !== currentDay) {
+      currentDay = day;
+      appendDayDivider(target, formatDayLabel(day));
+    }
+    target.appendChild(renderCaptureBubble(capture));
+  }
+}
+
+function appendDayDivider(target, label) {
+  const divider = document.createElement("div");
+  divider.className = "day-divider";
+  divider.textContent = label;
+  target.appendChild(divider);
+}
+
+function renderCaptureBubble(capture) {
+  const bubble = document.createElement("article");
+  bubble.className = "capture-bubble";
+  bubble.dataset.captureId = capture.clientId;
+  bubble.title = "Double-click to edit";
+  bubble.style.setProperty("--category-color", CATEGORY_COLORS[capture.category] || CATEGORY_COLORS.thought);
+
+  bubble.innerHTML = `
+    <div class="capture-meta">
+      <span class="category-label">
+        <svg aria-hidden="true"><use href="#${CATEGORY_ICONS[capture.category] || CATEGORY_ICONS.thought}"></use></svg>
+        ${escapeHtml(capture.category)}
+      </span>
+      <span>${escapeHtml(formatCaptureLabel(capture.label))}</span>
+    </div>
+    <p class="capture-text">${escapeHtml(capture.text)}</p>
+  `;
+
+  return bubble;
+}
+
+function getCaptureDay(capture) {
+  const heading = String(capture.heading || "").match(/\d{4}-\d{2}-\d{2}/);
+  if (heading) return heading[0];
+  const label = String(capture.label || "").match(/\d{4}-\d{2}-\d{2}/);
+  return label ? label[0] : "";
 }
 
 function renderIndexStatus() {
@@ -809,10 +1100,10 @@ function renderDashboardTaskList(target, tasks, emptyMessage) {
   }
   target.innerHTML = tasks.map((task) => `
     <article class="mini-row" data-task-id="${escapeHtml(task.id)}" title="Double-click to edit">
+      ${renderTaskSourceInfo(task)}
       ${renderTaskCheckbox(task)}
       <p>${escapeHtml(task.text)}</p>
       ${renderTaskBadges(task)}
-      <small>${escapeHtml(task.path)}:${task.lineNumber}</small>
     </article>
   `).join("");
 }
@@ -906,14 +1197,14 @@ function renderSearchError(message) {
 
 function renderTasks() {
   if (!tasksList || !tasksCount) return;
-  tasksCount.textContent = `${state.tasksTotal} open`;
+  tasksCount.textContent = `${state.tasksTotal} ${state.taskStatus}`;
   renderTaskFilterState();
 
   if (!state.tasks.length) {
     tasksList.innerHTML = `
       <div class="empty-state">
         <p class="empty-title">No open tasks found.</p>
-        <p>Rebuild the index after adding Markdown tasks.</p>
+        <p>${state.taskStatus === "done" ? "Completed tasks will appear here." : "Rebuild the index after adding Markdown tasks."}</p>
       </div>
     `;
     return;
@@ -921,27 +1212,44 @@ function renderTasks() {
 
   tasksList.innerHTML = state.tasks.map((task) => `
     <article class="task-row" data-task-id="${escapeHtml(task.id)}" title="Double-click to edit">
+      ${renderTaskSourceInfo(task)}
       ${renderTaskCheckbox(task)}
       <div class="task-main">
         <p>${escapeHtml(task.text)}</p>
         <div class="task-meta">
           ${renderTaskBadges(task)}
           ${task.project ? `<span>${escapeHtml(task.project)}</span>` : ""}
-          <span>${escapeHtml(task.path)}:${task.lineNumber}</span>
         </div>
       </div>
     </article>
   `).join("");
 }
 
+function renderTaskSourceInfo(task) {
+  if (!task?.id || !task?.path) return "";
+  const label = `${task.path}:${task.lineNumber}`;
+  return `
+    <button
+      class="task-info-button"
+      type="button"
+      data-open-obsidian="${escapeHtml(task.id)}"
+      aria-label="Open source note in Obsidian"
+      title="${escapeHtml(label)}"
+    >↗</button>
+  `;
+}
+
 function renderTaskCheckbox(task) {
+  const nextStatus = task.status === "done" ? "open" : "done";
+  const label = task.status === "done" ? "Reopen task" : "Mark task done";
   return `
     <button
       class="task-checkbox"
       type="button"
       data-task-toggle="${escapeHtml(task.id)}"
-      aria-label="Mark task done"
-      title="Mark done"
+      data-task-status="${escapeHtml(nextStatus)}"
+      aria-label="${escapeHtml(label)}"
+      title="${escapeHtml(label)}"
     ></button>
   `;
 }
@@ -1002,11 +1310,32 @@ function formatQuadrant(value) {
 }
 
 function renderTaskFilterState() {
-  taskFilterButtons.forEach((button) => {
-    const isActive = (button.dataset.scope || "all") === state.taskScope
-      && (button.dataset.focus || "all") === state.taskFocus;
-    button.classList.toggle("is-active", isActive);
-  });
+  if (taskStatusFilter) taskStatusFilter.value = state.taskStatus;
+  if (taskFocusFilter) taskFocusFilter.value = state.taskFocus;
+  if (taskScopeFilter) taskScopeFilter.value = state.taskScope;
+  if (taskSourceFilter) taskSourceFilter.value = state.taskSource;
+  taskFilterClearButton?.toggleAttribute("disabled", !hasActiveTaskFilters());
+}
+
+function readTaskFiltersFromControls() {
+  state.taskStatus = taskStatusFilter?.value || "open";
+  state.taskFocus = taskFocusFilter?.value || "all";
+  state.taskScope = taskScopeFilter?.value || "all";
+  state.taskSource = taskSourceFilter?.value || "all";
+}
+
+function resetTaskFilters() {
+  state.taskStatus = "open";
+  state.taskFocus = "all";
+  state.taskScope = "all";
+  state.taskSource = "all";
+}
+
+function hasActiveTaskFilters() {
+  return state.taskStatus !== "open"
+    || state.taskFocus !== "all"
+    || state.taskScope !== "all"
+    || state.taskSource !== "all";
 }
 
 function renderTasksError(message) {
@@ -1040,13 +1369,34 @@ function shouldSubmitCaptureFromKeyboard(event) {
   return window.matchMedia("(pointer: fine) and (min-width: 760px)").matches;
 }
 
-function flashHelper(message) {
-  const previous = helperLine.textContent;
+function flashHelper(message, { restoreText = "" } = {}) {
   helperLine.textContent = message;
   window.clearTimeout(flashHelper.timer);
   flashHelper.timer = window.setTimeout(() => {
-    helperLine.textContent = previous;
+    helperLine.textContent = restoreText;
   }, 1800);
+}
+
+function showUndoToast(taskId) {
+  if (!actionToast) {
+    flashHelper("Marked done.");
+    return;
+  }
+  window.clearTimeout(state.toastTimer);
+  actionToast.hidden = false;
+  actionToast.innerHTML = `
+    <span>Marked done.</span>
+    <button type="button" data-undo-task="${escapeHtml(taskId)}">Undo</button>
+  `;
+  state.toastTimer = window.setTimeout(hideToast, TASK_UNDO_TOAST_MS);
+}
+
+function hideToast() {
+  if (!actionToast) return;
+  window.clearTimeout(state.toastTimer);
+  state.toastTimer = null;
+  actionToast.hidden = true;
+  actionToast.innerHTML = "";
 }
 
 async function getJson(url) {
@@ -1059,12 +1409,21 @@ async function getJson(url) {
 async function postJson(url, payload) {
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getWriteHeaders(),
     body: JSON.stringify(payload)
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Request failed.");
+  if (!response.ok) {
+    if (response.status === 401) openAuthSheet();
+    throw new Error(data.error || "Request failed.");
+  }
   return data;
+}
+
+function getWriteHeaders() {
+  const headers = { "Content-Type": "application/json" };
+  if (state.authSecret) headers["X-Second-Brain-Secret"] = state.authSecret;
+  return headers;
 }
 
 function relativeMonthlyPath(filePath) {
@@ -1072,6 +1431,37 @@ function relativeMonthlyPath(filePath) {
   const normalized = filePath.replaceAll("\\", "/");
   const index = normalized.indexOf(marker);
   return index === -1 ? normalized : normalized.slice(index);
+}
+
+function getLocalDateSlug(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function getDuePresetForValue(value) {
+  if (!value) return "none";
+  const today = getLocalDateSlug();
+  if (value === today) return "today";
+  if (value === getLocalDateSlug(addDays(new Date(), 1))) return "tomorrow";
+  return "";
+}
+
+function formatDayLabel(day) {
+  const date = new Date(`${day}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return day || "Earlier";
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric"
+  }).format(date);
 }
 
 function formatCaptureLabel(label) {
