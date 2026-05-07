@@ -1,0 +1,8 @@
+# Paths are relative to VAULT_PATH.
+# Use one path or simple wildcard per line.
+#
+# Examples:
+# 4.Archive/
+# 2.Areas/Career/private-notes/
+# **/meeting-transcripts/
+# scratch/*.md

@@ -1,5 +1,5 @@
 import http from "node:http";
-import { promises as fs } from "node:fs";
+import { promises as fs, watch } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -17,6 +17,11 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const DATA_DIR = path.join(__dirname, ".data");
 const DB_PATH = path.join(DATA_DIR, "index.sqlite");
 const SQLITE_BIN = process.env.SQLITE_BIN || "/usr/bin/sqlite3";
+const WATCH_DEBOUNCE_MS = Number(process.env.WATCH_DEBOUNCE_MS || "1200");
+const AUTO_INDEX_ON_START = process.env.AUTO_INDEX_ON_START !== "false";
+const INDEX_IGNORE_FILE = process.env.INDEX_IGNORE_FILE
+  ? path.resolve(__dirname, process.env.INDEX_IGNORE_FILE)
+  : path.join(__dirname, ".second-brain-ignore");
 const CAPTURE_CATEGORIES = new Set(["log", "thought", "idea", "todo", "reflection"]);
 const SKIPPED_DIRS = new Set([".obsidian", ".git", ".trash", ".agents", "node_modules", ".data"]);
 const SKIPPED_PATH_PARTS = new Set(["attachments", "credentials"]);
@@ -27,6 +32,26 @@ if (!VAULT_PATH) {
   process.exit(1);
 }
 
+const watcherState = {
+  enabled: false,
+  recursive: false,
+  status: "stopped",
+  debounceMs: WATCH_DEBOUNCE_MS,
+  pending: false,
+  queued: false,
+  eventCount: 0,
+  lastEventAt: null,
+  lastEventPath: null,
+  lastRunAt: null,
+  lastReason: null,
+  lastError: null
+};
+let vaultWatcher = null;
+let indexTimer = null;
+let activeIndexPromise = null;
+let indexIgnoreRules = [];
+
+await loadIndexIgnoreRules();
 await ensureIndexSchema();
 
 const server = http.createServer(async (req, res) => {
@@ -51,6 +76,11 @@ const server = http.createServer(async (req, res) => {
       const body = await readRequestJson(req);
       const capture = await appendCapture(body);
       return sendJson(res, 201, { capture, monthlyFile: getCurrentMonthlyCaptureFile() });
+    }
+
+    if (url.pathname === "/api/captures/update" && req.method === "POST") {
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await updateCapture(body));
     }
 
     if (url.pathname === "/api/index/status" && req.method === "GET") {
@@ -79,6 +109,21 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, await getTasks({ status, scope, focus, limit }));
     }
 
+    if (url.pathname === "/api/tasks/toggle" && req.method === "POST") {
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await toggleTask(body));
+    }
+
+    if (url.pathname === "/api/tasks/triage" && req.method === "POST") {
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await triageTask(body));
+    }
+
+    if (url.pathname === "/api/tasks/update" && req.method === "POST") {
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await updateTask(body));
+    }
+
     if (req.method === "GET") {
       return serveStatic(url.pathname, res);
     }
@@ -93,6 +138,10 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`Second Brain App running at http://${HOST}:${PORT}`);
   console.log(`Vault path: ${VAULT_PATH}`);
+  startVaultWatcher();
+  if (AUTO_INDEX_ON_START) {
+    scheduleVaultIndex("startup", 500);
+  }
 });
 
 async function loadDotEnv(envPath) {
@@ -133,7 +182,8 @@ async function getHealth() {
     index: {
       ready: index.ready,
       lastRunAt: index.lastRunAt,
-      dbPath: DB_PATH
+      dbPath: DB_PATH,
+      watcher: index.watcher
     }
   };
 }
@@ -222,15 +272,34 @@ async function getIndexStatus() {
     skippedCount: Number(row.skipped_count || 0),
     durationMs: Number(row.duration_ms || 0),
     lastRunAt: row.last_run_at || null,
-    dbPath: DB_PATH
+    dbPath: DB_PATH,
+    watcher: getWatcherPublicState()
   };
 }
 
-async function runVaultIndex() {
+async function runVaultIndex({ reason = "manual" } = {}) {
+  if (activeIndexPromise) {
+    watcherState.queued = true;
+    return activeIndexPromise;
+  }
+
+  activeIndexPromise = performVaultIndex({ reason }).finally(() => {
+    activeIndexPromise = null;
+    if (watcherState.queued) {
+      watcherState.queued = false;
+      scheduleVaultIndex("queued", 100);
+    }
+  });
+
+  return activeIndexPromise;
+}
+
+async function performVaultIndex({ reason = "manual" } = {}) {
   const started = Date.now();
   const markdownFiles = [];
   const skipped = { count: 0 };
 
+  await loadIndexIgnoreRules();
   await collectMarkdownFiles(VAULT_PATH, markdownFiles, skipped);
 
   const notes = [];
@@ -278,6 +347,7 @@ async function runVaultIndex() {
 
   return {
     ok: true,
+    reason,
     ranAt: now,
     noteCount: notes.length,
     taskCount: tasks.length,
@@ -286,6 +356,123 @@ async function runVaultIndex() {
     durationMs: Date.now() - started,
     dbPath: DB_PATH
   };
+}
+
+function startVaultWatcher() {
+  if (vaultWatcher) return;
+
+  try {
+    vaultWatcher = watch(VAULT_PATH, { recursive: true }, (eventType, filename) => {
+      handleVaultWatchEvent(eventType, filename);
+    });
+    vaultWatcher.on("error", (error) => {
+      watcherState.status = "error";
+      watcherState.lastError = error.message;
+      console.warn(`Vault watcher error: ${error.message}`);
+    });
+    watcherState.enabled = true;
+    watcherState.recursive = true;
+    watcherState.status = "watching";
+    watcherState.lastError = null;
+    console.log(`Vault watcher active with ${WATCH_DEBOUNCE_MS}ms debounce.`);
+  } catch (error) {
+    watcherState.enabled = false;
+    watcherState.status = "unavailable";
+    watcherState.lastError = error.message;
+    console.warn(`Vault watcher unavailable: ${error.message}`);
+  }
+}
+
+function handleVaultWatchEvent(eventType, filename) {
+  const relativePath = filename ? String(filename).split(path.sep).join("/") : "";
+  if (relativePath && shouldIgnoreWatchEvent(relativePath)) return;
+
+  watcherState.eventCount += 1;
+  watcherState.lastEventAt = new Date().toISOString();
+  watcherState.lastEventPath = relativePath || "(unknown)";
+  scheduleVaultIndex(`watch:${eventType}`, WATCH_DEBOUNCE_MS);
+}
+
+function shouldIgnoreWatchEvent(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/");
+  if (!normalized.toLowerCase().endsWith(".md")) return true;
+  return shouldSkipRelativeVaultPath(normalized);
+}
+
+function scheduleVaultIndex(reason, delayMs = WATCH_DEBOUNCE_MS) {
+  watcherState.pending = true;
+  watcherState.lastReason = reason;
+  windowClearTimeout(indexTimer);
+  indexTimer = setTimeout(async () => {
+    watcherState.pending = false;
+    try {
+      const result = await runVaultIndex({ reason });
+      watcherState.lastRunAt = result.ranAt;
+      watcherState.lastError = null;
+      watcherState.status = watcherState.enabled ? "watching" : watcherState.status;
+      console.log(`Vault index rebuilt (${reason}) in ${result.durationMs}ms.`);
+    } catch (error) {
+      watcherState.status = "error";
+      watcherState.lastError = error.message;
+      console.warn(`Vault index rebuild failed (${reason}): ${error.message}`);
+    }
+  }, delayMs);
+}
+
+function windowClearTimeout(timer) {
+  if (timer) clearTimeout(timer);
+}
+
+function getWatcherPublicState() {
+  return { ...watcherState };
+}
+
+async function loadIndexIgnoreRules() {
+  const envRules = String(process.env.INDEX_IGNORE || "")
+    .split(",")
+    .map((rule) => rule.trim())
+    .filter(Boolean);
+  const fileRules = [];
+
+  try {
+    const file = await fs.readFile(INDEX_IGNORE_FILE, "utf8");
+    for (const line of file.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      fileRules.push(trimmed);
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+
+  indexIgnoreRules = [...envRules, ...fileRules]
+    .map(normalizeIgnoreRule)
+    .filter(Boolean);
+}
+
+function normalizeIgnoreRule(rule) {
+  return String(rule || "")
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+}
+
+function matchesIndexIgnore(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  return indexIgnoreRules.some((rule) => matchesIgnoreRule(normalized, rule));
+}
+
+function matchesIgnoreRule(relativePath, rule) {
+  if (!rule) return false;
+  if (rule.includes("*")) {
+    const escaped = rule
+      .split("*")
+      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*");
+    return new RegExp(`^${escaped}(?:/.*)?$`).test(relativePath);
+  }
+  return relativePath === rule || relativePath.startsWith(`${rule}/`);
 }
 
 async function searchNotes(query, limit = 20) {
@@ -430,6 +617,186 @@ async function getTasks({ status = "open", scope = "all", focus = "all", limit =
   };
 }
 
+async function toggleTask(body) {
+  const task = await getIndexedTaskById(body?.taskId);
+  const filePath = resolveVaultMarkdownPath(task.path);
+  const markdown = await fs.readFile(filePath, "utf8");
+  const { lines, newline } = splitMarkdownLines(markdown);
+  const lineIndex = Number(task.line_number) - 1;
+  const line = lines[lineIndex];
+
+  if (!line) throw httpError(404, "Task line was not found.");
+
+  const match = line.match(/^(\s*[-*]\s+\[)([ xX])(\]\s+.+)$/);
+  if (!match) throw httpError(400, "Task line is not a Markdown checkbox.");
+
+  const nextStatus = body?.status === "open" || body?.status === "done"
+    ? body.status
+    : task.status === "open" ? "done" : "open";
+  const marker = nextStatus === "done" ? "x" : " ";
+  lines[lineIndex] = `${match[1]}${marker}${match[3]}`;
+
+  await fs.writeFile(filePath, joinMarkdownLines(lines, newline), "utf8");
+  await runVaultIndex({ reason: "task-toggle" });
+
+  return {
+    ok: true,
+    taskId: task.task_id,
+    status: nextStatus,
+    path: task.path,
+    lineNumber: Number(task.line_number)
+  };
+}
+
+async function triageTask(body) {
+  const task = await getIndexedTaskById(body?.taskId);
+  const metadata = normalizeTodoCaptureMetadata(body);
+  const filePath = resolveVaultMarkdownPath(task.path);
+  const markdown = await fs.readFile(filePath, "utf8");
+  const { lines, newline } = splitMarkdownLines(markdown);
+  const lineIndex = Number(task.line_number) - 1;
+  const line = lines[lineIndex];
+
+  if (!line) throw httpError(404, "Task line was not found.");
+  if (!/^\s*[-*]\s+\[[ xX]\]\s+/.test(line)) {
+    throw httpError(400, "Task line is not a Markdown checkbox.");
+  }
+
+  lines[lineIndex] = applyTodoMetadataToLine(line, metadata);
+
+  await fs.writeFile(filePath, joinMarkdownLines(lines, newline), "utf8");
+  await runVaultIndex({ reason: "task-triage" });
+
+  return {
+    ok: true,
+    taskId: task.task_id,
+    metadata,
+    path: task.path,
+    lineNumber: Number(task.line_number)
+  };
+}
+
+async function updateTask(body) {
+  const task = await getIndexedTaskById(body?.taskId);
+  const text = normalizeEditText(body?.text);
+  const filePath = resolveVaultMarkdownPath(task.path);
+  const markdown = await fs.readFile(filePath, "utf8");
+  const { lines, newline } = splitMarkdownLines(markdown);
+  const lineIndex = Number(task.line_number) - 1;
+  const line = lines[lineIndex];
+
+  if (!line) throw httpError(404, "Task line was not found.");
+  if (!/^\s*[-*]\s+\[[ xX]\]\s+/.test(line)) {
+    throw httpError(400, "Task line is not a Markdown checkbox.");
+  }
+
+  const replacement = replaceTaskTextInLine(line, text);
+  lines.splice(lineIndex, 1, ...replacement);
+
+  await fs.writeFile(filePath, joinMarkdownLines(lines, newline), "utf8");
+  await runVaultIndex({ reason: "task-update" });
+
+  return {
+    ok: true,
+    taskId: task.task_id,
+    text,
+    path: task.path,
+    lineNumber: Number(task.line_number)
+  };
+}
+
+async function getIndexedTaskById(taskId) {
+  const id = String(taskId || "").trim();
+  if (!id) throw httpError(400, "Task id is required.");
+  const rows = await dbQuery(`
+    SELECT task_id, path, line_number, status, text
+    FROM tasks
+    WHERE task_id = ${sqlValue(id)}
+    LIMIT 1
+  `);
+  const task = rows[0];
+  if (!task) throw httpError(404, "Task was not found in the current index.");
+  return task;
+}
+
+function resolveVaultMarkdownPath(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!normalized.endsWith(".md")) throw httpError(400, "Only Markdown tasks can be edited.");
+  if (shouldSkipRelativeVaultPath(normalized)) throw httpError(400, "This task path is ignored by the index.");
+
+  const root = path.resolve(VAULT_PATH);
+  const filePath = path.resolve(root, normalized);
+  if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`)) {
+    throw httpError(400, "Task path is outside the configured vault.");
+  }
+  return filePath;
+}
+
+function splitMarkdownLines(markdown) {
+  const newline = markdown.includes("\r\n") ? "\r\n" : "\n";
+  const hasTrailingNewline = markdown.endsWith("\n");
+  const lines = markdown.split(/\r?\n/);
+  if (hasTrailingNewline) lines.pop();
+  return { lines, newline };
+}
+
+function joinMarkdownLines(lines, newline) {
+  return `${lines.join(newline)}${newline}`;
+}
+
+function applyTodoMetadataToLine(line, metadata) {
+  const keys = ["type", "important", "urgent", "priority", "due"];
+  let next = line;
+  for (const key of keys) {
+    next = next.replace(new RegExp(`\\s*\\[${key}::\\s*[^\\]]+\\]`, "ig"), "");
+  }
+
+  const fields = [
+    "[type:: todo]",
+    `[important:: ${metadata.important ? "true" : "false"}]`,
+    `[urgent:: ${metadata.urgent ? "true" : "false"}]`,
+    `[priority:: ${metadata.priority}]`,
+    metadata.due ? `[due:: ${metadata.due}]` : ""
+  ].filter(Boolean);
+
+  return `${next.trimEnd()} ${fields.join(" ")}`;
+}
+
+function normalizeEditText(value) {
+  const lines = String(value || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const text = lines.join("\n");
+  if (!text) throw httpError(400, "Edited text is required.");
+  return text;
+}
+
+function replaceTaskTextInLine(line, text) {
+  const editLines = text.split("\n");
+  const [first, ...rest] = editLines;
+  const match = String(line || "").match(/^(\s*[-*]\s+\[[ xX]\]\s+)(.+?)\s*$/);
+  if (!match) throw httpError(400, "Task line is not a Markdown checkbox.");
+
+  const body = match[2];
+  const fields = [...body.matchAll(/\s*\[[A-Za-z0-9_-]+::\s*[^\]]+\]/g)]
+    .map((fieldMatch) => fieldMatch[0].trim())
+    .filter(Boolean);
+  const bodyWithoutFields = body
+    .replace(/\s*\[[A-Za-z0-9_-]+::\s*[^\]]+\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const time = readLeadingTaskTime(bodyWithoutFields);
+  const timePrefix = time ? `${time} ` : "";
+  const fieldText = fields.length ? ` ${fields.join(" ")}` : "";
+  const continuationPrefix = `${match[1].match(/^\s*/)[0]}  `;
+
+  return [
+    `${match[1]}${timePrefix}${first}${fieldText}`,
+    ...rest.map((textLine) => `${continuationPrefix}${textLine}`)
+  ];
+}
+
 function buildTaskWhereClause({ status, scope, focus }) {
   const clauses = [];
   const dueSoonCutoff = formatDate(addDays(new Date(), 7));
@@ -529,9 +896,15 @@ async function collectMarkdownFiles(dirPath, files, skipped) {
 }
 
 function shouldSkipVaultPath(relativePath, entry) {
-  const segments = relativePath.split("/").filter(Boolean);
   if (entry.isDirectory() && (SKIPPED_DIRS.has(entry.name) || entry.name.startsWith("."))) return true;
+  return shouldSkipRelativeVaultPath(relativePath);
+}
+
+function shouldSkipRelativeVaultPath(relativePath) {
+  const segments = String(relativePath || "").split("/").filter(Boolean);
+  if (segments.some((segment) => SKIPPED_DIRS.has(segment) || segment.startsWith("."))) return true;
   if (segments.some((segment) => SKIPPED_PATH_PARTS.has(segment.toLowerCase()))) return true;
+  if (matchesIndexIgnore(relativePath)) return true;
   return SENSITIVE_PATH_PATTERN.test(relativePath);
 }
 
@@ -691,8 +1064,14 @@ function cleanTaskText(value) {
     String(value)
       .replace(/\[[A-Za-z0-9_-]+::\s*[^\]]+]/g, "")
       .replace(/\b[A-Za-z0-9_-]+::\s+\S+/g, "")
+      .replace(/^\d{1,2}:\d{2}\s*(?:AM|PM)\s+/i, "")
       .replace(/\s+/g, " ")
   );
+}
+
+function readLeadingTaskTime(value) {
+  const match = String(value || "").match(/^(\d{1,2}:\d{2}\s*(?:AM|PM))\b/i);
+  return match ? match[1].replace(/\s+/, " ").toUpperCase() : "";
 }
 
 function readInlineMetadata(text, key) {
@@ -823,6 +1202,59 @@ async function appendCapture(body) {
   };
 }
 
+async function updateCapture(body) {
+  const content = String(body?.content || "").replace(/\r\n/g, "\n").trimEnd();
+  const text = normalizeEditText(body?.text);
+  if (!content) throw httpError(400, "Capture content is required.");
+
+  const filePath = getCurrentMonthlyCaptureFile();
+  const markdown = await readFileIfExists(filePath);
+  if (!markdown.trim()) throw httpError(404, "Monthly capture file is empty.");
+
+  const { lines, newline } = splitMarkdownLines(markdown);
+  const contentLines = content.split("\n");
+  const startIndex = findMarkdownBlock(lines, contentLines);
+  if (startIndex < 0) throw httpError(404, "Capture was not found in the current monthly file.");
+
+  const replacement = replaceCaptureText(contentLines, text);
+  lines.splice(startIndex, contentLines.length, ...replacement);
+
+  await fs.writeFile(filePath, joinMarkdownLines(lines, newline), "utf8");
+  await runVaultIndex({ reason: "capture-update" });
+
+  return {
+    ok: true,
+    text,
+    monthlyFile: filePath
+  };
+}
+
+function findMarkdownBlock(lines, blockLines) {
+  for (let index = 0; index <= lines.length - blockLines.length; index += 1) {
+    const matches = blockLines.every((blockLine, offset) => lines[index + offset].trimEnd() === blockLine.trimEnd());
+    if (matches) return index;
+  }
+  return -1;
+}
+
+function replaceCaptureText(contentLines, text) {
+  const firstLine = contentLines[0] || "";
+  if (/^\s*[-*]\s+\[[ xX]\]\s+/.test(firstLine)) {
+    return replaceTaskTextInLine(firstLine, text);
+  }
+
+  const typedMatch = firstLine.match(/^(-\s+\d{1,2}:\d{2}(?:\s*[AP]M)?\s+\[type::\s*(?:log|thought|idea|reflection)\]\s+)(.+?)\s*$/i);
+  if (typedMatch) {
+    const [first, ...rest] = text.split("\n");
+    return [
+      `${typedMatch[1]}${first}`,
+      ...rest.map((line) => `  ${line}`)
+    ];
+  }
+
+  throw httpError(400, "This capture format cannot be edited yet.");
+}
+
 function formatCaptureEntry({ date, category, text, todo = null }) {
   const time = formatTime(date);
   if (category === "todo") {
@@ -862,17 +1294,17 @@ function formatTodo(text, date, metadata = null) {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (!lines.length) return "- [ ]";
   const [first, ...rest] = lines;
+  const time = formatTime(date);
   const fields = [
     "[type:: todo]",
     metadata ? `[important:: ${metadata.important ? "true" : "false"}]` : "",
     metadata ? `[urgent:: ${metadata.urgent ? "true" : "false"}]` : "",
     metadata?.priority ? `[priority:: ${metadata.priority}]` : "",
-    metadata?.due ? `[due:: ${metadata.due}]` : "",
-    `[created:: ${formatTimestamp(date)}]`
+    metadata?.due ? `[due:: ${metadata.due}]` : ""
   ].filter(Boolean).join(" ");
 
   return [
-    `- [ ] ${first} ${fields}`,
+    `- [ ] ${time} ${first} ${fields}`,
     ...rest.map((line) => `  ${line}`)
   ].join("\n");
 }
@@ -983,7 +1415,8 @@ function parseStructuredCaptureLine(line, day) {
     const metadata = readInlineFields(todoMatch[1]);
     if (metadata.type?.toLowerCase() === "todo") {
       const text = cleanTaskText(todoMatch[1]);
-      const label = metadata.created || `${day} ${formatTimeFromDateString(day)}`;
+      const leadingTime = readLeadingTaskTime(todoMatch[1]);
+      const label = leadingTime ? `${day} ${leadingTime}` : metadata.created || day;
       const important = normalizeBooleanString(metadata.important);
       const urgent = normalizeBooleanString(metadata.urgent);
       return {

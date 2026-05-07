@@ -14,6 +14,11 @@ const CATEGORY_ICONS = {
   reflection: "icon-reflection"
 };
 
+const TASK_COMPLETE_EXIT_MS = 700;
+const THEME_STORAGE_KEY = "secondBrain.theme";
+const THEME_CHOICES = new Set(["system", "light", "dark"]);
+const systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
 const state = {
   category: "thought",
   captures: [],
@@ -25,8 +30,12 @@ const state = {
   dashboard: null,
   searchResults: [],
   pendingTodoText: "",
+  pendingTriageTask: null,
+  pendingEdit: null,
+  todoSheetMode: "capture",
   todoImportant: true,
-  todoUrgent: false
+  todoUrgent: false,
+  themePreference: "system"
 };
 
 const timeline = document.querySelector("#timeline");
@@ -55,15 +64,26 @@ const dashboardDueSoon = document.querySelector("#dashboard-due-soon");
 const dashboardTriage = document.querySelector("#dashboard-triage");
 const dashboardRecentNotes = document.querySelector("#dashboard-recent-notes");
 const todoSheet = document.querySelector("#todo-sheet");
+const todoSheetKicker = todoSheet?.querySelector(".sheet-header .eyebrow");
+const todoSheetTitle = document.querySelector("#todo-sheet-title");
 const todoImportantButtons = Array.from(document.querySelectorAll("[data-todo-important]"));
 const todoUrgentButtons = Array.from(document.querySelectorAll("[data-todo-urgent]"));
 const todoDueInput = document.querySelector("#todo-due");
 const todoConfirmButton = document.querySelector("#todo-confirm");
 const todoCancelButtons = Array.from(document.querySelectorAll("[data-todo-cancel]"));
+const themeButtons = Array.from(document.querySelectorAll("[data-theme-choice]"));
+const themeStatus = document.querySelector("#theme-status");
+const editSheet = document.querySelector("#edit-sheet");
+const editSheetKicker = document.querySelector("#edit-sheet-kicker");
+const editSheetTitle = document.querySelector("#edit-sheet-title");
+const editText = document.querySelector("#edit-text");
+const editConfirmButton = document.querySelector("#edit-confirm");
+const editCancelButtons = Array.from(document.querySelectorAll("[data-edit-cancel]"));
 
 init();
 
 async function init() {
+  initTheme();
   wireInteractions();
   await loadConfig();
   await Promise.all([loadCaptures(), loadIndexStatus()]);
@@ -89,8 +109,12 @@ function wireInteractions() {
     autoResize(textarea);
   });
 
+  editText?.addEventListener("input", () => {
+    autoResize(editText);
+  });
+
   textarea.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    if (shouldSubmitCaptureFromKeyboard(event)) {
       event.preventDefault();
       form.requestSubmit();
     }
@@ -101,7 +125,7 @@ function wireInteractions() {
     const text = textarea.value.trim();
     if (!text) return;
     if (state.category === "todo") {
-      openTodoSheet(text);
+      openTodoSheet({ mode: "capture", text });
       return;
     }
     await submitCapture(text);
@@ -125,15 +149,39 @@ function wireInteractions() {
     button.addEventListener("click", () => closeTodoSheet());
   });
 
-  todoConfirmButton?.addEventListener("click", async () => {
-    await submitCapture(state.pendingTodoText, {
-      important: state.todoImportant,
-      urgent: state.todoUrgent,
-      due: todoDueInput?.value || ""
+  editCancelButtons.forEach((button) => {
+    button.addEventListener("click", () => closeEditSheet());
+  });
+
+  themeButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      setThemePreference(button.dataset.themeChoice);
     });
   });
 
+  todoConfirmButton?.addEventListener("click", async () => {
+    const metadata = {
+      important: state.todoImportant,
+      urgent: state.todoUrgent,
+      due: todoDueInput?.value || ""
+    };
+
+    if (state.todoSheetMode === "triage") {
+      await submitTaskTriage(metadata);
+    } else {
+      await submitCapture(state.pendingTodoText, metadata);
+    }
+  });
+
+  editConfirmButton?.addEventListener("click", async () => {
+    await submitEdit();
+  });
+
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && editSheet && !editSheet.hidden) {
+      closeEditSheet();
+      return;
+    }
     if (event.key === "Escape" && todoSheet && !todoSheet.hidden) {
       closeTodoSheet();
     }
@@ -147,6 +195,14 @@ function wireInteractions() {
     await loadTasks();
   });
 
+  tasksList?.addEventListener("click", handleTaskActionClick);
+  tasksList?.addEventListener("dblclick", handleTaskEditDoubleClick);
+  timeline?.addEventListener("dblclick", handleCaptureEditDoubleClick);
+  [dashboardFocusTasks, dashboardDueSoon, dashboardTriage].forEach((target) => {
+    target?.addEventListener("click", handleTaskActionClick);
+    target?.addEventListener("dblclick", handleTaskEditDoubleClick);
+  });
+
   taskFilterButtons.forEach((button) => {
     button.addEventListener("click", async () => {
       state.taskScope = button.dataset.scope || "all";
@@ -156,10 +212,87 @@ function wireInteractions() {
     });
   });
 
+  dashboardOverview?.addEventListener("click", (event) => {
+    const tile = event.target.closest("[data-dashboard-task-focus]");
+    if (!tile) return;
+    openTaskView({
+      scope: tile.dataset.dashboardTaskScope || "all",
+      focus: tile.dataset.dashboardTaskFocus || "all"
+    });
+  });
+
   searchForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     await runSearch();
   });
+}
+
+function initTheme() {
+  state.themePreference = getStoredThemePreference();
+  applyThemePreference(state.themePreference);
+
+  const handleSystemThemeChange = () => {
+    if (state.themePreference === "system") {
+      applyThemePreference("system", { persist: false });
+    }
+  };
+
+  if (systemThemeQuery.addEventListener) {
+    systemThemeQuery.addEventListener("change", handleSystemThemeChange);
+  } else if (systemThemeQuery.addListener) {
+    systemThemeQuery.addListener(handleSystemThemeChange);
+  }
+}
+
+function getStoredThemePreference() {
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return THEME_CHOICES.has(stored) ? stored : "system";
+  } catch {
+    return "system";
+  }
+}
+
+function setThemePreference(preference) {
+  applyThemePreference(preference);
+}
+
+function applyThemePreference(preference, { persist = true } = {}) {
+  const normalized = THEME_CHOICES.has(preference) ? preference : "system";
+  const resolved = normalized === "system" ? getSystemTheme() : normalized;
+  state.themePreference = normalized;
+  document.documentElement.dataset.themePreference = normalized;
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.style.colorScheme = resolved;
+
+  if (persist) {
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, normalized);
+    } catch {
+      // Ignore private browsing/storage failures; the selected theme still applies for this page.
+    }
+  }
+
+  renderThemeControls();
+}
+
+function getSystemTheme() {
+  return systemThemeQuery.matches ? "dark" : "light";
+}
+
+function renderThemeControls() {
+  themeButtons.forEach((button) => {
+    const isActive = button.dataset.themeChoice === state.themePreference;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
+
+  if (themeStatus) {
+    const resolved = document.documentElement.dataset.theme || getSystemTheme();
+    themeStatus.textContent = state.themePreference === "system"
+      ? `System · ${capitalize(resolved)}`
+      : capitalize(state.themePreference);
+  }
 }
 
 function setActiveTab(tab) {
@@ -196,6 +329,13 @@ function setActiveTab(tab) {
   }
 }
 
+function openTaskView({ scope = "all", focus = "all" } = {}) {
+  state.taskScope = scope;
+  state.taskFocus = focus;
+  setActiveTab("tasks");
+  renderTaskFilterState();
+}
+
 async function loadConfig() {
   try {
     const config = await getJson("/api/config/public");
@@ -210,7 +350,10 @@ async function loadConfig() {
 async function loadCaptures() {
   try {
     const data = await getJson("/api/captures/recent");
-    state.captures = data.captures || [];
+    state.captures = (data.captures || []).map((capture, index) => ({
+      ...capture,
+      clientId: `${capture.id}-${index}`
+    }));
     renderTimeline();
   } catch (error) {
     renderError(error.message);
@@ -300,12 +443,17 @@ async function runSearch() {
   }
 }
 
-function openTodoSheet(text) {
+function openTodoSheet({ mode = "capture", text = "", task = null } = {}) {
   if (!todoSheet) return;
+  state.todoSheetMode = mode;
   state.pendingTodoText = text;
-  state.todoImportant = true;
-  state.todoUrgent = false;
-  if (todoDueInput) todoDueInput.value = "";
+  state.pendingTriageTask = task;
+  state.todoImportant = task?.important ?? true;
+  state.todoUrgent = task?.urgent ?? false;
+  if (todoDueInput) todoDueInput.value = task?.due || "";
+  if (todoSheetKicker) todoSheetKicker.textContent = mode === "triage" ? "task triage" : "todo capture";
+  if (todoSheetTitle) todoSheetTitle.textContent = mode === "triage" ? "Triage this task" : "Clarify the task";
+  if (todoConfirmButton) todoConfirmButton.textContent = mode === "triage" ? "Save triage" : "Save todo";
   renderTodoSheetState();
   todoSheet.hidden = false;
   document.body.classList.add("sheet-open");
@@ -317,7 +465,12 @@ function closeTodoSheet() {
   todoSheet.hidden = true;
   document.body.classList.remove("sheet-open");
   state.pendingTodoText = "";
-  textarea.focus();
+  state.pendingTriageTask = null;
+  state.todoSheetMode = "capture";
+  if (todoSheetKicker) todoSheetKicker.textContent = "todo capture";
+  if (todoSheetTitle) todoSheetTitle.textContent = "Clarify the task";
+  if (todoConfirmButton) todoConfirmButton.textContent = "Save todo";
+  if (document.querySelector('[data-tab-panel="capture"].is-active')) textarea.focus();
 }
 
 function renderTodoSheetState() {
@@ -357,6 +510,170 @@ async function submitCapture(text, metadata = {}) {
   }
 }
 
+async function submitTaskTriage(metadata = {}) {
+  if (!state.pendingTriageTask) return;
+  if (todoConfirmButton) todoConfirmButton.disabled = true;
+
+  try {
+    await postJson("/api/tasks/triage", {
+      taskId: state.pendingTriageTask.id,
+      ...metadata
+    });
+    closeTodoSheet();
+    await refreshTaskSurfaces();
+  } catch (error) {
+    flashHelper(error.message);
+  } finally {
+    if (todoConfirmButton) todoConfirmButton.disabled = false;
+  }
+}
+
+async function handleTaskActionClick(event) {
+  const toggleButton = event.target.closest("[data-task-toggle]");
+  if (toggleButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    await toggleTaskDone(toggleButton.dataset.taskToggle);
+    return;
+  }
+
+  const triageButton = event.target.closest("[data-task-triage]");
+  if (triageButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    const task = findTaskById(triageButton.dataset.taskTriage);
+    if (task) openTodoSheet({ mode: "triage", task });
+  }
+}
+
+function handleCaptureEditDoubleClick(event) {
+  const card = event.target.closest("[data-capture-id]");
+  if (!card || event.target.closest("button")) return;
+  const capture = state.captures.find((item) => item.clientId === card.dataset.captureId);
+  if (capture) openEditSheet({ kind: "capture", item: capture });
+}
+
+function handleTaskEditDoubleClick(event) {
+  const row = event.target.closest("[data-task-id]");
+  if (!row || event.target.closest("button")) return;
+  const task = findTaskById(row.dataset.taskId);
+  if (task) openEditSheet({ kind: "task", item: task });
+}
+
+function openEditSheet({ kind, item }) {
+  if (!editSheet || !editText) return;
+  state.pendingEdit = { kind, item };
+  editText.value = item.text || "";
+  autoResize(editText);
+  if (editSheetKicker) editSheetKicker.textContent = kind === "task" ? "task" : item.category || "capture";
+  if (editSheetTitle) editSheetTitle.textContent = kind === "task" ? "Edit task" : "Edit capture";
+  editSheet.hidden = false;
+  document.body.classList.add("sheet-open");
+  requestAnimationFrame(() => {
+    editText.focus();
+    editText.select();
+  });
+}
+
+function closeEditSheet() {
+  if (!editSheet) return;
+  editSheet.hidden = true;
+  document.body.classList.remove("sheet-open");
+  state.pendingEdit = null;
+  if (editText) editText.value = "";
+  if (document.querySelector('[data-tab-panel="capture"].is-active')) textarea.focus();
+}
+
+async function submitEdit() {
+  if (!state.pendingEdit || !editText) return;
+  const text = editText.value.trim();
+  if (!text) {
+    flashHelper("Edited text is required.");
+    return;
+  }
+
+  if (editConfirmButton) editConfirmButton.disabled = true;
+
+  try {
+    const { kind, item } = state.pendingEdit;
+    if (kind === "capture") {
+      await postJson("/api/captures/update", {
+        content: item.content,
+        text
+      });
+      closeEditSheet();
+      await loadCaptures();
+      const activeTab = document.querySelector("[data-tab-panel].is-active")?.dataset.tabPanel;
+      if (activeTab === "dashboard") await loadDashboard();
+    } else {
+      await postJson("/api/tasks/update", {
+        taskId: item.id,
+        text
+      });
+      closeEditSheet();
+      await refreshTaskSurfaces();
+    }
+  } catch (error) {
+    flashHelper(error.message);
+  } finally {
+    if (editConfirmButton) editConfirmButton.disabled = false;
+  }
+}
+
+async function toggleTaskDone(taskId) {
+  if (!taskId) return;
+  const buttons = Array.from(document.querySelectorAll(`[data-task-toggle="${cssEscape(taskId)}"]`));
+  const rows = getTaskRowsForButtons(buttons);
+  buttons.forEach((button) => {
+    button.disabled = true;
+    button.setAttribute("aria-label", "Task completed");
+  });
+  markTaskRowsCompleting(rows, true);
+
+  try {
+    await postJson("/api/tasks/toggle", { taskId, status: "done" });
+    await delay(TASK_COMPLETE_EXIT_MS);
+    await refreshTaskSurfaces();
+  } catch (error) {
+    markTaskRowsCompleting(rows, false);
+    flashHelper(error.message);
+  } finally {
+    buttons.forEach((button) => {
+      button.disabled = false;
+      button.setAttribute("aria-label", "Mark task done");
+    });
+  }
+}
+
+function getTaskRowsForButtons(buttons) {
+  return buttons
+    .map((button) => button.closest(".task-row, .mini-row"))
+    .filter(Boolean);
+}
+
+function markTaskRowsCompleting(rows, isCompleting) {
+  rows.forEach((row) => {
+    row.classList.toggle("is-completing", isCompleting);
+  });
+}
+
+async function refreshTaskSurfaces() {
+  await loadIndexStatus();
+  const activeTab = document.querySelector("[data-tab-panel].is-active")?.dataset.tabPanel;
+  if (activeTab === "tasks") await loadTasks();
+  if (activeTab === "dashboard") await loadDashboard();
+}
+
+function findTaskById(taskId) {
+  const lists = [
+    state.tasks,
+    state.dashboard?.highFocusTasks || [],
+    state.dashboard?.dueSoonTasks || [],
+    state.dashboard?.triageTasks || []
+  ];
+  return lists.flat().find((task) => task.id === taskId) || null;
+}
+
 function renderTimeline() {
   timeline.innerHTML = "";
 
@@ -373,6 +690,8 @@ function renderTimeline() {
   for (const capture of [...state.captures].reverse()) {
     const bubble = document.createElement("article");
     bubble.className = "capture-bubble";
+    bubble.dataset.captureId = capture.clientId;
+    bubble.title = "Double-click to edit";
     bubble.style.setProperty("--category-color", CATEGORY_COLORS[capture.category] || CATEGORY_COLORS.thought);
 
     bubble.innerHTML = `
@@ -399,6 +718,7 @@ function renderIndexStatus() {
 
   const status = state.indexStatus;
   const lastRun = status.lastRunAt ? formatDateTime(status.lastRunAt) : "Not indexed yet";
+  const watcher = formatWatcherStatus(status.watcher);
   indexStatus.innerHTML = `
     <div class="metric">
       <span class="metric-value">${numberFormat(status.noteCount)}</span>
@@ -413,6 +733,7 @@ function renderIndexStatus() {
       <span class="metric-label">Skipped paths</span>
     </div>
     <p class="index-meta">Last indexed: ${escapeHtml(lastRun)}</p>
+    <p class="index-meta">Watcher: ${escapeHtml(watcher)}</p>
   `;
 }
 
@@ -430,38 +751,38 @@ function renderDashboardOverview(data) {
   if (!dashboardOverview) return;
   const summary = data.taskSummary || {};
   dashboardOverview.innerHTML = `
-    <article class="overview-tile">
+    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="do-now" aria-label="Show do now tasks">
       <span class="overview-value">${numberFormat(summary.doNowCount)}</span>
       <span class="overview-label">Do now</span>
-    </article>
-    <article class="overview-tile">
+    </button>
+    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="schedule" aria-label="Show scheduled tasks">
       <span class="overview-value">${numberFormat(summary.scheduleCount)}</span>
       <span class="overview-label">Schedule</span>
-    </article>
-    <article class="overview-tile">
+    </button>
+    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="quick" aria-label="Show quick tasks">
       <span class="overview-value">${numberFormat(summary.quickCount)}</span>
       <span class="overview-label">Quick</span>
-    </article>
-    <article class="overview-tile">
+    </button>
+    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="someday" aria-label="Show someday tasks">
       <span class="overview-value">${numberFormat(summary.somedayCount)}</span>
       <span class="overview-label">Someday</span>
-    </article>
-    <article class="overview-tile">
+    </button>
+    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="due-soon" aria-label="Show due soon tasks">
       <span class="overview-value">${numberFormat(summary.dueSoonCount)}</span>
       <span class="overview-label">Due soon</span>
-    </article>
-    <article class="overview-tile">
+    </button>
+    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="high" aria-label="Show high focus tasks">
       <span class="overview-value">${numberFormat(summary.highCount)}</span>
       <span class="overview-label">High focus</span>
-    </article>
-    <article class="overview-tile">
+    </button>
+    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="triage" aria-label="Show tasks needing triage">
       <span class="overview-value">${numberFormat(summary.triageCount)}</span>
       <span class="overview-label">Needs triage</span>
-    </article>
-    <article class="overview-tile">
+    </button>
+    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="all" aria-label="Show all open tasks">
       <span class="overview-value">${numberFormat(summary.openCount)}</span>
       <span class="overview-label">Open tasks</span>
-    </article>
+    </button>
   `;
 }
 
@@ -487,8 +808,8 @@ function renderDashboardTaskList(target, tasks, emptyMessage) {
     return;
   }
   target.innerHTML = tasks.map((task) => `
-    <article class="mini-row">
-      <span class="task-checkbox" aria-hidden="true"></span>
+    <article class="mini-row" data-task-id="${escapeHtml(task.id)}" title="Double-click to edit">
+      ${renderTaskCheckbox(task)}
       <p>${escapeHtml(task.text)}</p>
       ${renderTaskBadges(task)}
       <small>${escapeHtml(task.path)}:${task.lineNumber}</small>
@@ -599,8 +920,8 @@ function renderTasks() {
   }
 
   tasksList.innerHTML = state.tasks.map((task) => `
-    <article class="task-row">
-      <span class="task-checkbox" aria-hidden="true"></span>
+    <article class="task-row" data-task-id="${escapeHtml(task.id)}" title="Double-click to edit">
+      ${renderTaskCheckbox(task)}
       <div class="task-main">
         <p>${escapeHtml(task.text)}</p>
         <div class="task-meta">
@@ -613,24 +934,61 @@ function renderTasks() {
   `).join("");
 }
 
+function renderTaskCheckbox(task) {
+  return `
+    <button
+      class="task-checkbox"
+      type="button"
+      data-task-toggle="${escapeHtml(task.id)}"
+      aria-label="Mark task done"
+      title="Mark done"
+    ></button>
+  `;
+}
+
 function renderTaskBadges(task) {
   const badges = [];
-  if (task.quadrant) badges.push({ label: formatQuadrant(task.quadrant), className: `task-badge-${task.quadrant}` });
-  if (task.important === true) badges.push({ label: "important", className: "task-badge-important" });
-  if (task.urgent === true) badges.push({ label: "urgent", className: "task-badge-urgent" });
-  if (task.priority) badges.push({ label: task.priority, className: `priority-${String(task.priority).toLowerCase()}` });
-  if (task.due) badges.push({ label: `due ${task.due}`, className: "task-badge-due" });
-  if (task.hasTodoMetadata === false || task.quadrant === "triage") badges.push({ label: "needs triage", className: "task-badge-triage" });
+  const taskId = task.id || null;
+  const makeEditable = (badge) => taskId ? {
+    ...badge,
+    className: `${badge.className} task-badge-button`,
+    taskId
+  } : badge;
+
+  if (shouldShowQuadrantBadge(task)) {
+    badges.push(makeEditable({ label: formatQuadrant(task.quadrant), className: `task-badge-${task.quadrant}` }));
+  }
+  if (task.important === true) badges.push(makeEditable({ label: "important", className: "task-badge-important" }));
+  if (task.urgent === true) badges.push(makeEditable({ label: "urgent", className: "task-badge-urgent" }));
+  if (task.priority) badges.push(makeEditable({ label: task.priority, className: `priority-${String(task.priority).toLowerCase()}` }));
+  if (task.due) badges.push(makeEditable({ label: `due ${task.due}`, className: "task-badge-due" }));
+  if (task.hasTodoMetadata === false || task.quadrant === "triage") {
+    badges.push({
+      label: "needs triage",
+      className: "task-badge-triage task-badge-button",
+      taskId
+    });
+  }
 
   if (!badges.length) return "";
 
   return `
     <div class="task-badges">
       ${badges.map((badge) => `
-        <span class="task-badge ${escapeHtml(badge.className)}">${escapeHtml(badge.label)}</span>
+        ${badge.taskId ? `
+          <button class="task-badge ${escapeHtml(badge.className)}" type="button" data-task-triage="${escapeHtml(badge.taskId)}" aria-label="Edit task metadata">${escapeHtml(badge.label)}</button>
+        ` : `
+          <span class="task-badge ${escapeHtml(badge.className)}">${escapeHtml(badge.label)}</span>
+        `}
       `).join("")}
     </div>
   `;
+}
+
+function shouldShowQuadrantBadge(task) {
+  if (!task.quadrant) return false;
+  if (task.quadrant === "schedule" && task.due) return false;
+  return true;
 }
 
 function formatQuadrant(value) {
@@ -673,6 +1031,13 @@ function renderError(message) {
 function autoResize(element) {
   element.style.height = "auto";
   element.style.height = `${Math.min(element.scrollHeight, 144)}px`;
+}
+
+function shouldSubmitCaptureFromKeyboard(event) {
+  if (event.key !== "Enter" || event.isComposing) return false;
+  if (event.shiftKey) return false;
+  if (event.metaKey || event.ctrlKey) return true;
+  return window.matchMedia("(pointer: fine) and (min-width: 760px)").matches;
 }
 
 function flashHelper(message) {
@@ -730,6 +1095,31 @@ function formatDateTime(value) {
 
 function numberFormat(value) {
   return new Intl.NumberFormat("en-US").format(Number(value || 0));
+}
+
+function capitalize(value) {
+  const text = String(value || "");
+  return text ? `${text.charAt(0).toUpperCase()}${text.slice(1)}` : "";
+}
+
+function formatWatcherStatus(watcher) {
+  if (!watcher) return "unavailable";
+  if (watcher.status === "watching" && watcher.pending) return "watching, indexing soon";
+  if (watcher.status === "watching" && watcher.queued) return "watching, queued";
+  if (watcher.status === "watching") return "watching";
+  if (watcher.status === "error") return `error: ${watcher.lastError || "unknown"}`;
+  return watcher.status || "unavailable";
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return CSS.escape(value);
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function escapeHtml(value) {

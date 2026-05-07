@@ -4,6 +4,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Second Brain Capture</title>
+    <script>
+      (() => {
+        try {
+          const stored = localStorage.getItem("secondBrain.theme");
+          const preference = ["light", "dark", "system"].includes(stored) ? stored : "system";
+          const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          const theme = preference === "system" ? (prefersDark ? "dark" : "light") : preference;
+          document.documentElement.dataset.themePreference = preference;
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch {
+          document.documentElement.dataset.themePreference = "system";
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -170,6 +185,7 @@
               <button class="filter-pill" type="button" data-task-filter="work" data-scope="work" data-focus="all">Work</button>
               <button class="filter-pill" type="button" data-task-filter="personal" data-scope="personal" data-focus="all">Personal</button>
               <button class="filter-pill" type="button" data-task-filter="due" data-scope="all" data-focus="due">Due</button>
+              <button class="filter-pill" type="button" data-task-filter="due-soon" data-scope="all" data-focus="due-soon">Due soon</button>
               <button class="filter-pill" type="button" data-task-filter="high" data-scope="all" data-focus="high">High</button>
               <button class="filter-pill" type="button" data-task-filter="triage" data-scope="all" data-focus="triage">No metadata</button>
             </div>
@@ -237,6 +253,23 @@
                 <h2>Recent notes</h2>
                 <div class="mini-list" id="dashboard-recent-notes"></div>
               </section>
+              <section class="dashboard-section dashboard-section-wide settings-section">
+                <div class="section-heading-row">
+                  <h2>Settings</h2>
+                  <span id="theme-status">System</span>
+                </div>
+                <div class="setting-row">
+                  <div>
+                    <p class="setting-title">Appearance</p>
+                    <p class="setting-description">Follow the device theme or choose a fixed app theme.</p>
+                  </div>
+                  <div class="theme-toggle" role="group" aria-label="Appearance theme">
+                    <button class="theme-option" type="button" data-theme-choice="system">System</button>
+                    <button class="theme-option" type="button" data-theme-choice="light">Light</button>
+                    <button class="theme-option" type="button" data-theme-choice="dark">Dark</button>
+                  </div>
+                </div>
+              </section>
             </div>
 
             <form class="search-form" id="search-form">
@@ -291,6 +324,29 @@
         <div class="sheet-actions">
           <button class="secondary-button" type="button" data-todo-cancel>Cancel</button>
           <button class="primary-button" id="todo-confirm" type="button">Save todo</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="todo-sheet" id="edit-sheet" hidden>
+      <button class="sheet-backdrop" type="button" aria-label="Close editor" data-edit-cancel></button>
+      <section class="sheet-panel edit-panel" role="dialog" aria-modal="true" aria-labelledby="edit-sheet-title">
+        <div class="sheet-header">
+          <div>
+            <p class="eyebrow" id="edit-sheet-kicker">edit</p>
+            <h2 id="edit-sheet-title">Edit card</h2>
+          </div>
+          <button class="sheet-close" type="button" aria-label="Close editor" data-edit-cancel>×</button>
+        </div>
+
+        <label class="edit-field" for="edit-text">
+          <span>Text</span>
+          <textarea id="edit-text" rows="4" spellcheck="true"></textarea>
+        </label>
+
+        <div class="sheet-actions">
+          <button class="secondary-button" type="button" data-edit-cancel>Cancel</button>
+          <button class="primary-button" id="edit-confirm" type="button">Save edit</button>
         </div>
       </section>
     </div>
