@@ -14,11 +14,17 @@ const CATEGORY_ICONS = {
   reflection: "icon-reflection"
 };
 
+const CAPTURE_TYPE_OPTIONS = ["log", "thought", "idea", "reflection"];
 const TASK_COMPLETE_EXIT_MS = 500;
 const TASK_UNDO_TOAST_MS = 5200;
 const THEME_STORAGE_KEY = "secondBrain.theme";
 const APP_SECRET_STORAGE_KEY = "secondBrain.appSecret";
+const CHAT_THINKING_STORAGE_KEY = "secondBrain.chatThinkingMode";
+const CHAT_SESSION_STORAGE_KEY = "secondBrain.activeChatSession";
+const CHAT_SUGGEST_DEBOUNCE_MS = 90;
+const CHAT_RESPONSE_POLL_MS = 3000;
 const THEME_CHOICES = new Set(["system", "light", "dark"]);
+const CHAT_THINKING_CHOICES = new Set(["disabled", "enabled"]);
 const systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
 const state = {
@@ -32,10 +38,30 @@ const state = {
   taskSource: "all",
   taskFocus: "all",
   captureView: "today",
+  chatMessages: [],
+  chatSending: false,
+  chatThinkingMode: "disabled",
+  chatSession: null,
+  chatSessions: [],
+  chatSessionPickerOpen: false,
+  chatResponsePollTimer: null,
+  captureSwipe: null,
+  chatSuggestions: {
+    open: false,
+    trigger: "",
+    kind: "",
+    query: "",
+    start: 0,
+    end: 0,
+    items: [],
+    activeIndex: 0,
+    requestId: 0
+  },
   dashboard: null,
   config: null,
   searchResults: [],
   pendingTodoText: "",
+  pendingChatCaptureSource: "",
   pendingTriageTask: null,
   pendingEdit: null,
   todoSheetMode: "capture",
@@ -62,6 +88,17 @@ const indexRunButton = document.querySelector("#index-run-button");
 const searchForm = document.querySelector("#search-form");
 const searchInput = document.querySelector("#search-input");
 const searchResults = document.querySelector("#search-results");
+const chatTimeline = document.querySelector("#chat-timeline");
+const chatForm = document.querySelector("#chat-form");
+const chatText = document.querySelector("#chat-text");
+const chatSendButton = document.querySelector("#chat-send-button");
+const chatHelperLine = document.querySelector("#chat-helper-line");
+const chatStatus = document.querySelector("#chat-status");
+const chatThinkingButtons = Array.from(document.querySelectorAll("[data-chat-thinking]"));
+const chatSuggestions = document.querySelector("#chat-suggestions");
+const chatNewSessionButton = document.querySelector("#chat-new-session");
+const chatSessionHistoryButton = document.querySelector("#chat-session-history");
+const chatSessionPopover = document.querySelector("#chat-session-popover");
 const tasksList = document.querySelector("#tasks-list");
 const tasksCount = document.querySelector("#tasks-count");
 const tasksRefreshButton = document.querySelector("#tasks-refresh-button");
@@ -110,6 +147,7 @@ async function init() {
   wireInteractions();
   registerServiceWorker();
   await loadConfig();
+  await loadStoredChatSession();
   await Promise.all([loadCaptures(), loadIndexStatus()]);
   textarea.focus();
 }
@@ -137,6 +175,36 @@ function wireInteractions() {
     autoResize(editText);
   });
 
+  chatText?.addEventListener("input", () => {
+    autoResize(chatText);
+    updateChatSuggestions();
+  });
+
+  chatText?.addEventListener("click", updateChatSuggestions);
+  chatText?.addEventListener("blur", () => {
+    window.setTimeout(closeChatSuggestions, 120);
+  });
+
+  chatThinkingButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const requestedMode = button.dataset.chatThinking === "enabled" ? "enabled" : "disabled";
+      state.chatThinkingMode = state.chatThinkingMode === requestedMode ? "disabled" : requestedMode;
+      localStorage.setItem(CHAT_THINKING_STORAGE_KEY, state.chatThinkingMode);
+      renderChatThinkingState();
+      chatText?.focus();
+    });
+  });
+
+  chatNewSessionButton?.addEventListener("click", async () => {
+    await startNewChatSession();
+  });
+
+  chatSessionHistoryButton?.addEventListener("click", async () => {
+    await toggleChatSessionPicker();
+  });
+
+  chatSessionPopover?.addEventListener("mousedown", handleChatSessionPickerPointer);
+
   textarea.addEventListener("keydown", (event) => {
     if (shouldSubmitCaptureFromKeyboard(event)) {
       event.preventDefault();
@@ -153,6 +221,19 @@ function wireInteractions() {
       return;
     }
     await submitCapture(text);
+  });
+
+  chatText?.addEventListener("keydown", (event) => {
+    if (handleChatSuggestionKeydown(event)) return;
+    if (shouldSubmitCaptureFromKeyboard(event)) {
+      event.preventDefault();
+      chatForm?.requestSubmit();
+    }
+  });
+
+  chatForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await submitChat();
   });
 
   todoImportantButtons.forEach((button) => {
@@ -255,7 +336,14 @@ function wireInteractions() {
   });
 
   tasksList?.addEventListener("click", handleTaskActionClick);
+  chatTimeline?.addEventListener("click", handleChatSourceClick);
+  chatSuggestions?.addEventListener("mousedown", handleChatSuggestionPointer);
   tasksList?.addEventListener("dblclick", handleTaskEditDoubleClick);
+  timeline?.addEventListener("change", handleCaptureCategoryChange);
+  timeline?.addEventListener("pointerdown", handleCapturePointerDown);
+  timeline?.addEventListener("pointermove", handleCapturePointerMove);
+  timeline?.addEventListener("pointerup", handleCapturePointerUp);
+  timeline?.addEventListener("pointercancel", resetCaptureSwipe);
   timeline?.addEventListener("dblclick", handleCaptureEditDoubleClick);
   [dashboardFocusTasks, dashboardDueSoon, dashboardTriage].forEach((target) => {
     target?.addEventListener("click", handleTaskActionClick);
@@ -439,6 +527,11 @@ function setActiveTab(tab) {
     textarea.focus();
   }
 
+  if (tab === "chat") {
+    renderChat();
+    chatText?.focus();
+  }
+
   if (tab === "dashboard") {
     loadDashboard();
     if (!state.searchResults.length) runSearch();
@@ -462,12 +555,401 @@ async function loadConfig() {
   try {
     const config = await getJson("/api/config/public");
     state.config = config;
+    const storedThinkingMode = localStorage.getItem(CHAT_THINKING_STORAGE_KEY);
+    state.chatThinkingMode = CHAT_THINKING_CHOICES.has(storedThinkingMode)
+      ? storedThinkingMode
+      : (config.chat?.defaultThinking || "disabled");
     vaultName.textContent = config.vaultName;
     currentMonth.textContent = config.currentMonth;
+    if (chatStatus) chatStatus.textContent = config.chat?.enabled ? getActiveChatModel() : "API key needed";
     helperLine.textContent = "";
+    renderChatThinkingState();
     renderSettingsDetails(config);
   } catch (error) {
     helperLine.textContent = error.message;
+  }
+}
+
+function renderChatThinkingState() {
+  chatThinkingButtons.forEach((button) => {
+    const active = state.chatThinkingMode === "enabled";
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  if (chatStatus && state.config?.chat?.enabled) {
+    chatStatus.textContent = getActiveChatModel();
+  }
+}
+
+function getThinkingLabel() {
+  return state.chatThinkingMode === "enabled" ? "thinking" : "regular";
+}
+
+function getActiveChatModel() {
+  if (!state.config?.chat) return "";
+  const model = state.chatThinkingMode === "enabled"
+    ? (state.config.chat.thinkingModel || state.config.chat.model || "")
+    : (state.config.chat.regularModel || state.config.chat.model || "");
+  return formatDisplayModel(model);
+}
+
+function formatDisplayModel(model) {
+  return String(model || "").split("/").pop() || "";
+}
+
+function getActiveChatSessionPath() {
+  if (state.chatSession?.path) return state.chatSession.path;
+  try {
+    return window.localStorage.getItem(CHAT_SESSION_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+async function loadStoredChatSession() {
+  let stored = "";
+  try {
+    stored = window.localStorage.getItem(CHAT_SESSION_STORAGE_KEY) || "";
+  } catch {
+    stored = "";
+  }
+  if (!stored) return;
+
+  try {
+    const params = new URLSearchParams({ path: stored });
+    const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
+    state.chatSession = data.session || null;
+    state.chatMessages = (data.messages || []).filter((message) => message.content);
+    renderChat();
+    renderChatSessionState();
+    flashChatHelper(state.chatSession?.title ? `Loaded ${state.chatSession.title}.` : "Loaded session.");
+  } catch (error) {
+    window.localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
+    state.chatSession = null;
+    state.chatMessages = [];
+    renderChatSessionState();
+    flashChatHelper(error.message);
+  }
+}
+
+async function startNewChatSession() {
+  closeChatSessionPicker();
+  state.chatSession = null;
+  state.chatMessages = [];
+  try {
+    window.localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures; the in-memory session is still reset.
+  }
+  renderChat();
+  renderChatSessionState();
+  flashChatHelper("New session ready.");
+  chatText?.focus();
+}
+
+async function toggleChatSessionPicker() {
+  if (state.chatSessionPickerOpen) {
+    closeChatSessionPicker();
+    return;
+  }
+  state.chatSessionPickerOpen = true;
+  renderChatSessionPicker({ loading: true });
+  try {
+    const data = await protectedGetJson("/api/chat/sessions?limit=30");
+    state.chatSessions = data.sessions || [];
+    renderChatSessionPicker();
+  } catch (error) {
+    renderChatSessionPicker({ error: error.message });
+  }
+}
+
+function closeChatSessionPicker() {
+  state.chatSessionPickerOpen = false;
+  if (chatSessionPopover) {
+    chatSessionPopover.hidden = true;
+    chatSessionPopover.innerHTML = "";
+  }
+  chatSessionHistoryButton?.setAttribute("aria-expanded", "false");
+}
+
+function renderChatSessionPicker({ loading = false, error = "" } = {}) {
+  if (!chatSessionPopover) return;
+  chatSessionPopover.hidden = false;
+  chatSessionHistoryButton?.setAttribute("aria-expanded", "true");
+  const sessions = state.chatSessions || [];
+  chatSessionPopover.innerHTML = `
+    <div class="session-popover-head">
+      <strong>Chat sessions</strong>
+      <span>${escapeHtml(state.config?.chat?.sessionsDir || "")}</span>
+    </div>
+    ${loading ? `<p class="session-empty">Loading sessions...</p>` : ""}
+    ${error ? `<p class="session-empty">${escapeHtml(error)}</p>` : ""}
+    ${!loading && !error && sessions.length ? `
+      <div class="session-list">
+        ${sessions.map(renderChatSessionOption).join("")}
+      </div>
+    ` : ""}
+    ${!loading && !error && !sessions.length ? `<p class="session-empty">No saved sessions yet.</p>` : ""}
+  `;
+}
+
+function renderChatSessionOption(session) {
+  const active = state.chatSession?.path === session.path;
+  return `
+    <button class="session-option ${active ? "is-active" : ""}" type="button" data-session-path="${escapeHtml(session.path)}">
+      <strong>${escapeHtml(session.title || "Untitled session")}</strong>
+      <small>${escapeHtml(formatSessionUpdated(session.updated || session.created))}</small>
+    </button>
+  `;
+}
+
+async function handleChatSessionPickerPointer(event) {
+  const button = event.target.closest("[data-session-path]");
+  if (!button) return;
+  event.preventDefault();
+  await openChatSession(button.dataset.sessionPath || "");
+}
+
+async function openChatSession(sessionPath) {
+  if (!sessionPath) return;
+  try {
+    const params = new URLSearchParams({ path: sessionPath });
+    const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
+    state.chatSession = data.session || null;
+    state.chatMessages = (data.messages || []).filter((message) => message.content);
+    if (state.chatSession?.path) {
+      window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, state.chatSession.path);
+    }
+    closeChatSessionPicker();
+    renderChat();
+    renderChatSessionState();
+    flashChatHelper(state.chatSession?.title ? `Opened ${state.chatSession.title}.` : "Opened session.");
+    chatText?.focus();
+  } catch (error) {
+    renderChatSessionPicker({ error: error.message });
+  }
+}
+
+function renderChatSessionState() {
+  if (!chatSessionHistoryButton) return;
+  chatSessionHistoryButton.textContent = state.chatSession?.title ? clipUiText(state.chatSession.title, 18) : "Sessions";
+  chatSessionHistoryButton.title = state.chatSession?.path || "Sessions";
+}
+
+function formatSessionUpdated(value) {
+  if (!value) return "No date";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function clipUiText(value, length) {
+  const text = String(value || "").trim();
+  return text.length > length ? `${text.slice(0, length - 1)}...` : text;
+}
+
+function updateChatSuggestions() {
+  if (!chatText || !chatSuggestions) return;
+  const match = getActiveReferenceToken(chatText.value, chatText.selectionStart || 0);
+  if (!match) {
+    closeChatSuggestions();
+    return;
+  }
+
+  state.chatSuggestions = {
+    ...state.chatSuggestions,
+    open: true,
+    trigger: match.trigger,
+    kind: match.kind,
+    query: match.query,
+    start: match.start,
+    end: match.end,
+    activeIndex: 0
+  };
+  renderChatSuggestions();
+  window.clearTimeout(updateChatSuggestions.timer);
+  updateChatSuggestions.timer = window.setTimeout(loadChatSuggestions, CHAT_SUGGEST_DEBOUNCE_MS);
+}
+
+function getActiveReferenceToken(value, caret) {
+  const before = String(value || "").slice(0, caret);
+  const match = before.match(/(?:^|\s)([#/@])([A-Za-z0-9_-]*)$/);
+  if (!match) return null;
+  const trigger = match[1];
+  const query = match[2] || "";
+  const tokenStart = before.length - trigger.length - query.length;
+  return {
+    trigger,
+    kind: getReferenceKindForTrigger(trigger),
+    query,
+    start: tokenStart,
+    end: caret
+  };
+}
+
+function getReferenceKindForTrigger(trigger) {
+  if (trigger === "#") return "file";
+  if (trigger === "/") return "skill";
+  if (trigger === "@") return "people";
+  return "";
+}
+
+async function loadChatSuggestions() {
+  if (!state.chatSuggestions.open || !state.chatSuggestions.kind) return;
+  const requestId = state.chatSuggestions.requestId + 1;
+  state.chatSuggestions.requestId = requestId;
+  renderChatSuggestions({ loading: true });
+  try {
+    const params = new URLSearchParams({
+      kind: state.chatSuggestions.kind,
+      q: state.chatSuggestions.query
+    });
+    const data = await protectedGetJson(`/api/chat/references?${params.toString()}`);
+    if (requestId !== state.chatSuggestions.requestId) return;
+    state.chatSuggestions.items = data.suggestions || [];
+    state.chatSuggestions.activeIndex = 0;
+    renderChatSuggestions();
+  } catch (error) {
+    if (requestId !== state.chatSuggestions.requestId) return;
+    state.chatSuggestions.items = [];
+    renderChatSuggestions({ error: error.message });
+  }
+}
+
+function renderChatSuggestions({ loading = false, error = "" } = {}) {
+  if (!chatSuggestions || !state.chatSuggestions.open) return;
+  const label = getReferenceLabel(state.chatSuggestions.kind);
+  const items = state.chatSuggestions.items || [];
+  chatSuggestions.hidden = false;
+  positionChatSuggestions();
+  chatSuggestions.innerHTML = `
+    <div class="suggestion-head">
+      <span>${escapeHtml(state.chatSuggestions.trigger)}</span>
+      <strong>${escapeHtml(label)}</strong>
+    </div>
+    ${loading ? `<p class="suggestion-empty">Searching...</p>` : ""}
+    ${error ? `<p class="suggestion-empty">${escapeHtml(error)}</p>` : ""}
+    ${!loading && !error && items.length ? `
+      <div class="suggestion-list" role="listbox">
+        ${items.map((item, index) => renderChatSuggestionItem(item, index)).join("")}
+      </div>
+    ` : ""}
+    ${!loading && !error && !items.length ? `<p class="suggestion-empty">No ${escapeHtml(label.toLowerCase())} found.</p>` : ""}
+  `;
+}
+
+function renderChatSuggestionItem(item, index) {
+  const active = index === state.chatSuggestions.activeIndex;
+  return `
+    <button class="suggestion-item ${active ? "is-active" : ""}" type="button" data-suggestion-index="${index}" role="option" aria-selected="${active}">
+      <span class="suggestion-token">${escapeHtml(state.chatSuggestions.trigger)}${escapeHtml(item.token || item.name || item.title)}</span>
+      <strong>${escapeHtml(item.title || item.name || item.token)}</strong>
+      <small>${escapeHtml(getReferenceKindSingular(item.kind || state.chatSuggestions.kind))}</small>
+    </button>
+  `;
+}
+
+function getReferenceLabel(kind) {
+  if (kind === "mentor") return "Mentors";
+  if (kind === "assistant") return "Assistants";
+  if (kind === "skill") return "Skills";
+  if (kind === "people") return "People";
+  if (kind === "file") return "Files";
+  return "References";
+}
+
+function getReferenceKindSingular(kind) {
+  if (kind === "mentor") return "mentor";
+  if (kind === "assistant") return "assistant";
+  if (kind === "skill") return "skill";
+  if (kind === "people") return "person";
+  if (kind === "file") return "file";
+  return "reference";
+}
+
+function positionChatSuggestions() {
+  if (!chatSuggestions || !chatText || !chatForm) return;
+  const formRect = chatForm.getBoundingClientRect();
+  const textRect = chatText.getBoundingClientRect();
+  const cursorRatio = estimateCursorRatio(chatText.value, state.chatSuggestions.start);
+  const popupWidth = Math.min(340, Math.max(260, textRect.width * 0.72));
+  const rawLeft = textRect.left - formRect.left + (textRect.width - popupWidth) * cursorRatio;
+  const maxLeft = Math.max(8, formRect.width - popupWidth - 8);
+  const left = Math.max(8, Math.min(rawLeft, maxLeft));
+  const bottom = Math.max(64, formRect.bottom - textRect.top + 8);
+  chatSuggestions.style.setProperty("--suggest-left", `${Math.round(left)}px`);
+  chatSuggestions.style.setProperty("--suggest-bottom", `${Math.round(bottom)}px`);
+  chatSuggestions.style.setProperty("--suggest-width", `${Math.round(popupWidth)}px`);
+}
+
+function estimateCursorRatio(value, index) {
+  const line = String(value || "").slice(0, index).split(/\n/).pop() || "";
+  return Math.max(0, Math.min(line.length / 42, 1));
+}
+
+function handleChatSuggestionKeydown(event) {
+  if (!state.chatSuggestions.open) return false;
+  const items = state.chatSuggestions.items || [];
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeChatSuggestions();
+    return true;
+  }
+  if (!items.length) return false;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    state.chatSuggestions.activeIndex = (state.chatSuggestions.activeIndex + 1) % items.length;
+    renderChatSuggestions();
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    state.chatSuggestions.activeIndex = (state.chatSuggestions.activeIndex - 1 + items.length) % items.length;
+    renderChatSuggestions();
+    return true;
+  }
+  if (event.key === "Enter" || event.key === "Tab") {
+    event.preventDefault();
+    insertChatSuggestion(items[state.chatSuggestions.activeIndex]);
+    return true;
+  }
+  return false;
+}
+
+function handleChatSuggestionPointer(event) {
+  const button = event.target.closest("[data-suggestion-index]");
+  if (!button) return;
+  event.preventDefault();
+  const item = state.chatSuggestions.items[Number(button.dataset.suggestionIndex)];
+  if (item) insertChatSuggestion(item);
+}
+
+function insertChatSuggestion(item) {
+  if (!chatText || !item) return;
+  const token = `${state.chatSuggestions.trigger}${item.token || item.name || item.title}`;
+  const before = chatText.value.slice(0, state.chatSuggestions.start);
+  const after = chatText.value.slice(state.chatSuggestions.end);
+  const suffix = after.startsWith(" ") ? "" : " ";
+  chatText.value = `${before}${token}${suffix}${after}`;
+  const caret = before.length + token.length + suffix.length;
+  chatText.setSelectionRange(caret, caret);
+  autoResize(chatText);
+  closeChatSuggestions();
+  chatText.focus();
+}
+
+function closeChatSuggestions() {
+  window.clearTimeout(updateChatSuggestions.timer);
+  state.chatSuggestions.open = false;
+  state.chatSuggestions.items = [];
+  if (chatSuggestions) {
+    chatSuggestions.hidden = true;
+    chatSuggestions.innerHTML = "";
   }
 }
 
@@ -539,7 +1021,7 @@ function renderSettingsDetails(config) {
 
 async function loadCaptures() {
   try {
-    const data = await getJson("/api/captures/recent");
+    const data = await getJson("/api/captures/recent?limit=200");
     state.captures = (data.captures || []).map((capture, index) => ({
       ...capture,
       clientId: `${capture.id}-${index}`
@@ -634,6 +1116,195 @@ async function runSearch() {
   }
 }
 
+async function submitChat() {
+  const message = chatText?.value.trim() || "";
+  if (!message || state.chatSending) return;
+  const activeSessionPath = getActiveChatSessionPath();
+  const baselineAssistantCount = state.chatMessages.filter((item) => item.role === "assistant" && !item.isError && !item.isPending).length;
+
+  const userMessage = {
+    id: `user-${Date.now()}`,
+    role: "user",
+    content: message,
+    sources: []
+  };
+  state.chatMessages.push(userMessage);
+  state.chatSending = true;
+  if (chatSendButton) chatSendButton.disabled = true;
+  if (chatText) {
+    chatText.value = "";
+    autoResize(chatText);
+  }
+  flashChatHelper("Thinking...");
+  renderChat();
+  const payloadHistory = state.chatMessages
+    .filter((item) => item.role === "user" || item.role === "assistant")
+    .slice(0, -1)
+    .slice(-8)
+    .map((item) => ({ role: item.role, content: item.content }));
+
+  let stopResponsePolling = () => {};
+  let assistantMessage = null;
+  try {
+    const session = await ensureChatSessionForSubmit(message, activeSessionPath);
+    state.chatSession = session || state.chatSession;
+    if (state.chatSession?.path) {
+      window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, state.chatSession.path);
+    }
+    renderChatSessionState();
+
+    assistantMessage = {
+      id: `assistant-${Date.now()}`,
+      role: "assistant",
+      content: "Waiting for OpenCode...",
+      sources: [],
+      mentor: null,
+      assistant: null,
+      people: [],
+      isPending: true,
+      sessionPath: state.chatSession?.path || activeSessionPath
+    };
+    state.chatMessages.push(assistantMessage);
+    renderChat();
+    if (state.chatSession?.path) {
+      stopResponsePolling = startChatResponsePolling(state.chatSession.path, assistantMessage.id, baselineAssistantCount);
+    }
+
+    const data = await postJson("/api/chat", {
+      message,
+      history: payloadHistory,
+      thinkingMode: state.chatThinkingMode,
+      sessionPath: state.chatSession?.path || activeSessionPath
+    });
+    stopResponsePolling();
+    state.chatSession = data.session || state.chatSession;
+    if (state.chatSession?.path) {
+      window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, state.chatSession.path);
+    }
+    renderChatSessionState();
+    updateChatMessage(assistantMessage.id, {
+      content: data.answer || "",
+      sources: data.sources || [],
+      mentor: data.mentor || null,
+      assistant: data.assistant || null,
+      people: data.people || [],
+      model: data.model || "",
+      thinkingMode: data.thinkingMode || state.chatThinkingMode,
+      sessionPath: state.chatSession?.path || activeSessionPath,
+      isPending: false
+    });
+    flashChatHelper(data.sources?.length
+      ? `Saved session · used ${data.sources.length} source${data.sources.length === 1 ? "" : "s"}.`
+      : "Saved session.");
+  } catch (error) {
+    stopResponsePolling();
+    if (assistantMessage) {
+      updateChatMessage(assistantMessage.id, {
+        content: error.message,
+        sources: [],
+        isError: true,
+        isPending: false
+      });
+    } else {
+      state.chatMessages.push({
+        id: `assistant-${Date.now()}`,
+        role: "assistant",
+        content: error.message,
+        sources: [],
+        isError: true
+      });
+    }
+    flashChatHelper(error.message);
+  } finally {
+    stopResponsePolling();
+    state.chatSending = false;
+    if (chatSendButton) chatSendButton.disabled = false;
+    renderChat();
+    chatText?.focus();
+  }
+}
+
+async function ensureChatSessionForSubmit(message, activeSessionPath) {
+  if (activeSessionPath) {
+    if (state.chatSession?.path === activeSessionPath) return state.chatSession;
+    const params = new URLSearchParams({ path: activeSessionPath });
+    const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
+    return data.session || null;
+  }
+  const data = await postJson("/api/chat/session", {
+    title: deriveClientChatTitle(message)
+  });
+  return data || null;
+}
+
+function deriveClientChatTitle(message) {
+  return clipUiText(String(message || "").replace(/\s+/g, " ").trim(), 48) || "New chat";
+}
+
+function startChatResponsePolling(sessionPath, assistantMessageId, baselineAssistantCount) {
+  stopChatResponsePolling();
+  let stopped = false;
+
+  const poll = async () => {
+    if (stopped || !sessionPath) return;
+    try {
+      const params = new URLSearchParams({ path: sessionPath });
+      const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
+      const assistantMessages = (data.messages || []).filter((item) => item.role === "assistant" && item.content);
+      if (assistantMessages.length <= baselineAssistantCount) return;
+      const partial = assistantMessages[baselineAssistantCount] || assistantMessages.at(-1);
+      if (!partial?.content) return;
+      const changed = updateChatMessage(assistantMessageId, {
+        content: partial.content,
+        sources: partial.sources || [],
+        mentor: partial.mentor || null,
+        assistant: partial.assistant || null,
+        people: partial.people || [],
+        isPending: true
+      });
+      if (changed) flashChatHelper("Receiving...");
+    } catch {
+      // The final /api/chat response still owns error handling.
+    }
+  };
+
+  state.chatResponsePollTimer = window.setInterval(poll, CHAT_RESPONSE_POLL_MS);
+  window.setTimeout(poll, CHAT_RESPONSE_POLL_MS);
+
+  return () => {
+    stopped = true;
+    stopChatResponsePolling();
+  };
+}
+
+function stopChatResponsePolling() {
+  if (!state.chatResponsePollTimer) return;
+  window.clearInterval(state.chatResponsePollTimer);
+  state.chatResponsePollTimer = null;
+}
+
+function updateChatMessage(messageId, patch) {
+  const message = state.chatMessages.find((item) => item.id === messageId);
+  if (!message) return false;
+  let changed = false;
+  for (const [key, value] of Object.entries(patch)) {
+    if (message[key] !== value) {
+      message[key] = value;
+      changed = true;
+    }
+  }
+  if (changed) renderChat();
+  return changed;
+}
+
+function handleChatSourceClick(event) {
+  const button = event.target.closest("[data-open-note]");
+  if (!button) return;
+  event.preventDefault();
+  const path = button.dataset.openNote || "";
+  if (path) window.location.href = getObsidianNoteUrl(path);
+}
+
 function openTodoSheet({ mode = "capture", text = "", task = null } = {}) {
   if (!todoSheet) return;
   state.todoSheetMode = mode;
@@ -701,6 +1372,7 @@ async function submitCapture(text, metadata = {}) {
     const result = await postJson("/api/captures", {
       category: state.category,
       text,
+      source: metadata.source || state.pendingChatCaptureSource || "",
       ...metadata
     });
 
@@ -713,6 +1385,7 @@ async function submitCapture(text, metadata = {}) {
   } catch (error) {
     flashHelper(error.message);
   } finally {
+    state.pendingChatCaptureSource = "";
     state.captureSaving = false;
     sendButton.disabled = false;
     if (todoConfirmButton) todoConfirmButton.disabled = false;
@@ -766,9 +1439,100 @@ async function handleTaskActionClick(event) {
 
 function handleCaptureEditDoubleClick(event) {
   const card = event.target.closest("[data-capture-id]");
-  if (!card || event.target.closest("button")) return;
+  if (!card || event.target.closest("button, select")) return;
   const capture = state.captures.find((item) => item.clientId === card.dataset.captureId);
   if (capture) openEditSheet({ kind: "capture", item: capture });
+}
+
+async function handleCaptureCategoryChange(event) {
+  const select = event.target.closest("[data-capture-category-select]");
+  if (!select) return;
+  const capture = state.captures.find((item) => item.clientId === select.dataset.captureCategorySelect);
+  const category = select.value;
+  if (!capture || category === capture.category) return;
+
+  select.disabled = true;
+  try {
+    await postJson("/api/captures/update", {
+      content: capture.content,
+      text: capture.displayText || capture.text,
+      category
+    });
+    await loadCaptures();
+    const activeTab = document.querySelector("[data-tab-panel].is-active")?.dataset.tabPanel;
+    if (activeTab === "dashboard") await loadDashboard();
+    flashHelper(`Changed to ${category}.`);
+  } catch (error) {
+    select.value = capture.category;
+    flashHelper(error.message);
+  } finally {
+    select.disabled = false;
+  }
+}
+
+function handleCapturePointerDown(event) {
+  const card = event.target.closest("[data-capture-id]");
+  if (!card || event.target.closest("button, select, textarea, input, a")) return;
+  state.captureSwipe = {
+    id: card.dataset.captureId,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: true
+  };
+  card.classList.add("is-swipe-ready");
+}
+
+function handleCapturePointerMove(event) {
+  const swipe = state.captureSwipe;
+  if (!swipe?.active || swipe.pointerId !== event.pointerId) return;
+  const card = timeline?.querySelector(`[data-capture-id="${cssEscape(swipe.id)}"]`);
+  if (!card) return;
+  const dx = Math.max(0, event.clientX - swipe.startX);
+  const dy = Math.abs(event.clientY - swipe.startY);
+  if (dy > 42) {
+    resetCaptureSwipe();
+    return;
+  }
+  card.style.setProperty("--swipe-offset", `${Math.min(dx, 92)}px`);
+  card.classList.toggle("is-swiping", dx > 12);
+}
+
+function handleCapturePointerUp(event) {
+  const swipe = state.captureSwipe;
+  if (!swipe?.active || swipe.pointerId !== event.pointerId) return;
+  const dx = event.clientX - swipe.startX;
+  const dy = Math.abs(event.clientY - swipe.startY);
+  const capture = state.captures.find((item) => item.clientId === swipe.id);
+  resetCaptureSwipe();
+  if (capture && dx > 86 && dy < 44) {
+    openChatForCapture(capture);
+  }
+}
+
+function resetCaptureSwipe() {
+  if (!state.captureSwipe?.id) {
+    state.captureSwipe = null;
+    return;
+  }
+  const card = timeline?.querySelector(`[data-capture-id="${cssEscape(state.captureSwipe.id)}"]`);
+  if (card) {
+    card.classList.remove("is-swipe-ready", "is-swiping");
+    card.style.removeProperty("--swipe-offset");
+  }
+  state.captureSwipe = null;
+}
+
+function openChatForCapture(capture) {
+  const category = capture.category || "capture";
+  const text = capture.displayText || capture.text || "";
+  setActiveTab("chat");
+  if (chatText) {
+    chatText.value = `Let's think through this ${category} capture:\n\n${text}`;
+    autoResize(chatText);
+    chatText.focus();
+  }
+  flashChatHelper("Capture loaded into chat.");
 }
 
 function handleTaskEditDoubleClick(event) {
@@ -781,7 +1545,7 @@ function handleTaskEditDoubleClick(event) {
 function openEditSheet({ kind, item }) {
   if (!editSheet || !editText) return;
   state.pendingEdit = { kind, item };
-  editText.value = item.text || "";
+  editText.value = kind === "capture" ? (item.displayText || item.text || "") : (item.text || "");
   autoResize(editText);
   if (editSheetKicker) editSheetKicker.textContent = kind === "task" ? "task" : item.category || "capture";
   if (editSheetTitle) editSheetTitle.textContent = kind === "task" ? "Edit task" : "Edit capture";
@@ -817,7 +1581,8 @@ async function submitEdit() {
     if (kind === "capture") {
       await postJson("/api/captures/update", {
         content: item.content,
-        text
+        text,
+        category: item.category
       });
       closeEditSheet();
       await loadCaptures();
@@ -898,9 +1663,79 @@ function findTaskById(taskId) {
 }
 
 function getObsidianTaskUrl(task) {
+  return getObsidianNoteUrl(task.path || "");
+}
+
+function getObsidianNoteUrl(notePath) {
   const vault = state.config?.vaultName || "";
-  const file = String(task.path || "").replace(/\.md$/i, "");
+  const file = String(notePath || "").replace(/\.md$/i, "");
   return `obsidian://open?vault=${encodeURIComponent(vault)}&file=${encodeURIComponent(file)}`;
+}
+
+function renderChat() {
+  if (!chatTimeline) return;
+  if (!state.chatMessages.length) {
+    chatTimeline.innerHTML = `
+      <div class="empty-state chat-empty">
+        <p class="empty-title">Ask the vault.</p>
+        <p>Use #mentor, /assistant, or @person to add focused context.</p>
+      </div>
+    `;
+    return;
+  }
+
+  chatTimeline.innerHTML = state.chatMessages.map((message) => `
+    <article class="chat-message chat-${escapeHtml(message.role)} ${message.isError ? "is-error" : ""}">
+      <div class="chat-message-body">
+        <p class="chat-role">${message.role === "user" ? "You" : "Second Brain"}</p>
+        <div class="chat-text">${formatMessageText(message.content)}</div>
+        ${renderChatContexts(message)}
+        ${message.sources?.length ? renderChatSources(message.sources) : ""}
+      </div>
+    </article>
+  `).join("");
+
+  requestAnimationFrame(() => {
+    chatTimeline.scrollTop = chatTimeline.scrollHeight;
+  });
+}
+
+function renderChatContexts(message) {
+  const contexts = [
+    message.mentor ? { label: message.mentor.autoSelected ? "Auto mentor" : "Mentor", item: message.mentor } : null,
+    message.assistant ? { label: message.assistant.autoSelected ? "Auto assistant" : "Assistant", item: message.assistant } : null,
+    ...(message.people || []).map((item) => ({ label: "Person", item }))
+  ].filter(Boolean);
+  if (!contexts.length) return "";
+  return `
+    <div class="chat-mentor">
+      ${contexts.map(({ label, item }) => `
+        <span>${escapeHtml(label)}</span>
+        <button type="button" data-open-note="${escapeHtml(item.path)}" title="${escapeHtml(item.path)}">${escapeHtml(item.title || item.name || label.toLowerCase())}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderChatSources(sources) {
+  return `
+    <div class="chat-sources" aria-label="Sources">
+      ${sources.map((source, index) => `
+        <button class="chat-source" type="button" data-open-note="${escapeHtml(source.path)}" title="${escapeHtml(source.path)}">
+          <span>${index + 1}</span>
+          <strong>${escapeHtml(source.title || source.path)}</strong>
+          <small>${escapeHtml(source.path)}</small>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function formatMessageText(value) {
+  return escapeHtml(value)
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${paragraph.replace(/\n/g, "<br>")}</p>`)
+    .join("");
 }
 
 function renderTimeline() {
@@ -920,33 +1755,58 @@ function renderTimeline() {
   const ordered = [...state.captures].reverse();
   const today = getLocalDateSlug();
   const todaysCaptures = ordered.filter((capture) => getCaptureDay(capture) === today);
-  const olderCaptures = ordered.filter((capture) => getCaptureDay(capture) !== today);
+  const weekStart = getStartOfWeekSlug();
+  const thisWeekCaptures = ordered.filter((capture) => {
+    const day = getCaptureDay(capture);
+    return day && day !== today && day >= weekStart;
+  });
+  const olderCaptures = ordered.filter((capture) => {
+    const day = getCaptureDay(capture);
+    return day && day !== today && day < weekStart;
+  });
+  const monthCaptures = ordered.filter((capture) => getCaptureDay(capture) !== today);
 
-  if (state.captureView === "month" && olderCaptures.length) {
+  if (state.captureView === "month" && monthCaptures.length) {
     const older = document.createElement("details");
     older.className = "capture-day capture-older";
-    older.innerHTML = `<summary>Older this month <span>${olderCaptures.length}</span></summary>`;
+    older.innerHTML = `<summary>Older this month <span>${monthCaptures.length}</span></summary>`;
     older.open = !todaysCaptures.length;
-    appendCaptureGroups(older, olderCaptures);
+    appendCaptureGroups(older, monthCaptures);
     timeline.appendChild(older);
+  }
+
+  if (state.captureView === "week" && thisWeekCaptures.length) {
+    appendCaptureGroups(timeline, thisWeekCaptures);
   }
 
   if (todaysCaptures.length) {
     appendDayDivider(timeline, "Today");
     todaysCaptures.forEach((capture) => timeline.appendChild(renderCaptureBubble(capture)));
-  } else if (olderCaptures.length) {
+  } else if (state.captureView === "week" && !thisWeekCaptures.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.innerHTML = `
+      <p class="empty-title">No captures this week.</p>
+      <p>Switch to Month to see older entries.</p>
+    `;
+    timeline.appendChild(empty);
+  } else if (monthCaptures.length) {
     appendDayDivider(timeline, "Today");
     const empty = document.createElement("p");
     empty.className = "quiet-line today-empty";
-    empty.textContent = state.captureView === "month"
-      ? "No captures yet today."
-      : "No captures yet today. Switch to Month to see older entries.";
+    empty.textContent = getEmptyTodayText();
     timeline.appendChild(empty);
   }
 
   requestAnimationFrame(() => {
     timeline.scrollTop = timeline.scrollHeight;
   });
+}
+
+function getEmptyTodayText() {
+  if (state.captureView === "month") return "No captures yet today.";
+  if (state.captureView === "week") return "No captures yet today.";
+  return "No captures yet today. Switch to This week or Month to see older entries.";
 }
 
 function renderCaptureViewState() {
@@ -985,16 +1845,35 @@ function renderCaptureBubble(capture) {
 
   bubble.innerHTML = `
     <div class="capture-meta">
-      <span class="category-label">
-        <svg aria-hidden="true"><use href="#${CATEGORY_ICONS[capture.category] || CATEGORY_ICONS.thought}"></use></svg>
-        ${escapeHtml(capture.category)}
-      </span>
+      ${renderCaptureCategoryControl(capture)}
       <span>${escapeHtml(formatCaptureLabel(capture.label))}</span>
     </div>
-    <p class="capture-text">${escapeHtml(capture.text)}</p>
+    <p class="capture-text">${escapeHtml(capture.displayText || capture.text)}</p>
   `;
 
   return bubble;
+}
+
+function renderCaptureCategoryControl(capture) {
+  const icon = CATEGORY_ICONS[capture.category] || CATEGORY_ICONS.thought;
+  if (capture.category === "todo") {
+    return `
+      <span class="category-label">
+        <svg aria-hidden="true"><use href="#${icon}"></use></svg>
+        ${escapeHtml(capture.category)}
+      </span>
+    `;
+  }
+  return `
+    <label class="category-label category-select-label" title="Change capture type">
+      <svg aria-hidden="true"><use href="#${icon}"></use></svg>
+      <select data-capture-category-select="${escapeHtml(capture.clientId)}" aria-label="Change capture type">
+        ${CAPTURE_TYPE_OPTIONS.map((category) => `
+          <option value="${escapeHtml(category)}" ${category === capture.category ? "selected" : ""}>${escapeHtml(category)}</option>
+        `).join("")}
+      </select>
+    </label>
+  `;
 }
 
 function getCaptureDay(capture) {
@@ -1002,6 +1881,15 @@ function getCaptureDay(capture) {
   if (heading) return heading[0];
   const label = String(capture.label || "").match(/\d{4}-\d{2}-\d{2}/);
   return label ? label[0] : "";
+}
+
+function getStartOfWeekSlug() {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  const day = date.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  date.setDate(date.getDate() + mondayOffset);
+  return getLocalDateSlug(date);
 }
 
 function renderIndexStatus() {
@@ -1377,6 +2265,15 @@ function flashHelper(message, { restoreText = "" } = {}) {
   }, 1800);
 }
 
+function flashChatHelper(message, { restoreText = "" } = {}) {
+  if (!chatHelperLine) return;
+  chatHelperLine.textContent = message;
+  window.clearTimeout(flashChatHelper.timer);
+  flashChatHelper.timer = window.setTimeout(() => {
+    chatHelperLine.textContent = restoreText;
+  }, 2200);
+}
+
 function showUndoToast(taskId) {
   if (!actionToast) {
     flashHelper("Marked done.");
@@ -1403,6 +2300,18 @@ async function getJson(url) {
   const response = await fetch(url);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Request failed.");
+  return data;
+}
+
+async function protectedGetJson(url) {
+  const response = await fetch(url, {
+    headers: getWriteHeaders()
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    if (response.status === 401) openAuthSheet();
+    throw new Error(data.error || "Request failed.");
+  }
   return data;
 }
 

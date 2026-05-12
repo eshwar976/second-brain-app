@@ -20,11 +20,29 @@ const SQLITE_BIN = process.env.SQLITE_BIN || "/usr/bin/sqlite3";
 const WATCH_DEBOUNCE_MS = Number(process.env.WATCH_DEBOUNCE_MS || "1200");
 const AUTO_INDEX_ON_START = process.env.AUTO_INDEX_ON_START !== "false";
 const APP_SECRET = process.env.APP_SECRET || "";
+const CHAT_PROVIDER = (process.env.CHAT_PROVIDER || "deepseek").toLowerCase();
+const OPENCODE_BASE_URL = (process.env.OPENCODE_BASE_URL || "http://127.0.0.1:4096").replace(/\/+$/, "");
+const OPENCODE_SERVER_USERNAME = process.env.OPENCODE_SERVER_USERNAME || "opencode";
+const OPENCODE_SERVER_PASSWORD = process.env.OPENCODE_SERVER_PASSWORD || "";
+const OPENCODE_REGULAR_MODEL = process.env.OPENCODE_REGULAR_MODEL || process.env.OPENCODE_MODEL || "deepseek/deepseek-v4-flash";
+const OPENCODE_THINKING_MODEL = process.env.OPENCODE_THINKING_MODEL || "deepseek/deepseek-v4-pro";
+const OPENCODE_AGENT = process.env.OPENCODE_AGENT || "";
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
+const DEEPSEEK_REGULAR_MODEL = process.env.DEEPSEEK_REGULAR_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
+const DEEPSEEK_THINKING_MODEL = process.env.DEEPSEEK_THINKING_MODEL || "deepseek-v4-pro";
+const DEEPSEEK_BASE_URL = (process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/+$/, "");
+const DEEPSEEK_TRAINING_OPT_OUT = process.env.DEEPSEEK_TRAINING_OPT_OUT !== "false";
+const DEEPSEEK_DEFAULT_THINKING = process.env.DEEPSEEK_THINKING === "enabled" ? "enabled" : "disabled";
+const DEEPSEEK_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT === "max" ? "max" : "high";
+const CHAT_CONTEXT_LIMIT = Math.min(Number(process.env.CHAT_CONTEXT_LIMIT || "6"), 12);
+const CHAT_HISTORY_LIMIT = Math.min(Number(process.env.CHAT_HISTORY_LIMIT || "8"), 16);
+const CHAT_SESSIONS_DIR = normalizeVaultRelativeDir(process.env.CHAT_SESSIONS_DIR || "3.Resources/gpt/sessions");
 const INDEX_IGNORE_FILE = process.env.INDEX_IGNORE_FILE
   ? path.resolve(__dirname, process.env.INDEX_IGNORE_FILE)
   : path.join(__dirname, ".second-brain-ignore");
 const CAPTURE_CATEGORIES = new Set(["log", "thought", "idea", "todo", "reflection"]);
 const SKIPPED_DIRS = new Set([".obsidian", ".git", ".trash", ".agents", "node_modules", ".data"]);
+const SKILL_ROOT = ".agents/skills";
 const SKIPPED_PATH_PARTS = new Set(["attachments", "credentials"]);
 const SENSITIVE_PATH_PATTERN = /(?:password|passwd|secret|token|credential|api[-_ ]?key|private[-_ ]?key)/i;
 
@@ -103,6 +121,54 @@ const server = http.createServer(async (req, res) => {
       const query = url.searchParams.get("q") || "";
       const limit = Math.min(Number(url.searchParams.get("limit") || "20"), 50);
       return sendJson(res, 200, await searchNotes(query, limit));
+    }
+
+    if (url.pathname === "/api/chat" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await answerChat(body));
+    }
+
+    if (url.pathname === "/api/chat/capture-summary" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await summarizeChatCapture(body));
+    }
+
+    if (url.pathname === "/api/chat/references" && req.method === "GET") {
+      requireWriteAuth(req);
+      const kind = url.searchParams.get("kind") || "";
+      const query = url.searchParams.get("q") || "";
+      return sendJson(res, 200, await getChatReferenceSuggestions(kind, query));
+    }
+
+    if (url.pathname === "/api/chat/skills" && req.method === "GET") {
+      requireWriteAuth(req);
+      const query = url.searchParams.get("q") || "";
+      return sendJson(res, 200, await getChatSkills(query));
+    }
+
+    if (url.pathname === "/api/chat/models" && req.method === "GET") {
+      requireWriteAuth(req);
+      return sendJson(res, 200, await getChatModels());
+    }
+
+    if (url.pathname === "/api/chat/sessions" && req.method === "GET") {
+      requireWriteAuth(req);
+      const limit = Math.min(Number(url.searchParams.get("limit") || "20"), 50);
+      return sendJson(res, 200, await listChatSessions(limit));
+    }
+
+    if (url.pathname === "/api/chat/session" && req.method === "GET") {
+      requireWriteAuth(req);
+      const sessionPath = url.searchParams.get("path") || "";
+      return sendJson(res, 200, await readChatSession(sessionPath));
+    }
+
+    if (url.pathname === "/api/chat/session" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 201, await createChatSession(body));
     }
 
     if (url.pathname === "/api/tasks" && req.method === "GET") {
@@ -238,6 +304,19 @@ async function getPublicConfig() {
     targetFile: getCurrentMonthlyCaptureFile(),
     ignoreRules,
     backups,
+    chat: {
+      enabled: isOpenCodeChatProvider() ? Boolean(OPENCODE_BASE_URL) : Boolean(DEEPSEEK_API_KEY),
+      provider: getChatProvider(),
+      model: isOpenCodeChatProvider() ? getOpenCodeModel(DEEPSEEK_DEFAULT_THINKING) : getDeepSeekModel(DEEPSEEK_DEFAULT_THINKING),
+      regularModel: isOpenCodeChatProvider() ? OPENCODE_REGULAR_MODEL : DEEPSEEK_REGULAR_MODEL,
+      thinkingModel: isOpenCodeChatProvider() ? OPENCODE_THINKING_MODEL : DEEPSEEK_THINKING_MODEL,
+      defaultThinking: DEEPSEEK_DEFAULT_THINKING,
+      trainingOptOut: DEEPSEEK_TRAINING_OPT_OUT,
+      contextLimit: CHAT_CONTEXT_LIMIT,
+      sessionsDir: isOpenCodeChatProvider() ? "OpenCode /session" : CHAT_SESSIONS_DIR,
+      opencodeBaseUrl: isOpenCodeChatProvider() ? OPENCODE_BASE_URL : "",
+      agent: isOpenCodeChatProvider() ? (OPENCODE_AGENT || "OpenCode default") : ""
+    },
     categories: Array.from(CAPTURE_CATEGORIES)
   };
 }
@@ -293,6 +372,8 @@ async function ensureIndexSchema() {
       note_id TEXT PRIMARY KEY,
       path TEXT NOT NULL UNIQUE,
       title TEXT NOT NULL,
+      type TEXT,
+      name TEXT,
       para TEXT,
       project TEXT,
       created TEXT,
@@ -330,11 +411,21 @@ async function ensureIndexSchema() {
   `);
   await ensureTaskColumn("important");
   await ensureTaskColumn("urgent");
+  await ensureNoteColumn("type");
+  await ensureNoteColumn("name");
 }
 
 async function ensureTaskColumn(columnName) {
   try {
     await dbExec(`ALTER TABLE tasks ADD COLUMN ${columnName} TEXT;`);
+  } catch (error) {
+    if (!/duplicate column name/i.test(error.message)) throw error;
+  }
+}
+
+async function ensureNoteColumn(columnName) {
+  try {
+    await dbExec(`ALTER TABLE notes_metadata ADD COLUMN ${columnName} TEXT;`);
   } catch (error) {
     if (!/duplicate column name/i.test(error.message)) throw error;
   }
@@ -396,6 +487,10 @@ async function performVaultIndex({ reason = "manual" } = {}) {
     const markdown = await fs.readFile(filePath, "utf8");
     const stat = await fs.stat(filePath);
     const note = parseMarkdownNote({ filePath, markdown, stat });
+    if (!shouldIndexNote(note)) {
+      skipped.count += 1;
+      continue;
+    }
     notes.push(note);
     tasks.push(...extractTasks(note, markdown));
   }
@@ -407,11 +502,12 @@ async function performVaultIndex({ reason = "manual" } = {}) {
     "DELETE FROM tasks;",
     ...notes.map((note) => `
       INSERT INTO notes_metadata (
-        note_id, path, title, para, project, created, updated, tags, headings, snippet, content
+        note_id, path, title, type, name, para, project, created, updated, tags, headings, snippet, content
       ) VALUES (
-        ${sqlValue(note.noteId)}, ${sqlValue(note.path)}, ${sqlValue(note.title)}, ${sqlValue(note.para)},
-        ${sqlValue(note.project)}, ${sqlValue(note.created)}, ${sqlValue(note.updated)}, ${sqlValue(note.tags)},
-        ${sqlValue(note.headings)}, ${sqlValue(note.snippet)}, ${sqlValue(note.content)}
+        ${sqlValue(note.noteId)}, ${sqlValue(note.path)}, ${sqlValue(note.title)}, ${sqlValue(note.type)},
+        ${sqlValue(note.name)}, ${sqlValue(note.para)}, ${sqlValue(note.project)}, ${sqlValue(note.created)},
+        ${sqlValue(note.updated)}, ${sqlValue(note.tags)}, ${sqlValue(note.headings)}, ${sqlValue(note.snippet)},
+        ${sqlValue(note.content)}
       );
     `),
     ...tasks.map((task) => `
@@ -603,6 +699,1324 @@ async function searchNotes(query, limit = 20) {
     .slice(0, limit);
 
   return { query: cleanQuery, results };
+}
+
+async function answerChat(body) {
+  if (isOpenCodeChatProvider()) {
+    return answerOpenCodeChat(body);
+  }
+  return answerDeepSeekChat(body);
+}
+
+async function answerDeepSeekChat(body) {
+  const message = normalizeChatMessage(body?.message);
+  const history = normalizeChatHistory(body?.history);
+  const thinkingMode = normalizeThinkingMode(body?.thinkingMode);
+  const references = parseChatReferences(message, body);
+  const requestedSessionPath = normalizeOptionalChatSessionPath(body?.sessionPath);
+  const existingSession = requestedSessionPath ? await readChatSessionMetadata(requestedSessionPath) : null;
+  const [sources, explicitMentor, explicitAssistant, people, autoSkills] = await Promise.all([
+    retrieveChatSources(message, CHAT_CONTEXT_LIMIT),
+    references.mentor ? getSkillPrompt("mentor", references.mentor) : Promise.resolve(null),
+    references.skill ? getSkillPromptAny(references.skill) : references.assistant ? getSkillPrompt("assistant", references.assistant) : Promise.resolve(null),
+    references.people.length ? getPeopleContexts(references.people) : Promise.resolve([]),
+    routeChatSkills(message, references)
+  ]);
+  const mentor = explicitMentor || autoSkills.mentor;
+  const assistant = explicitAssistant || autoSkills.assistant;
+
+  if (!DEEPSEEK_API_KEY) {
+    throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable vault-aware chat.");
+  }
+
+  const response = await callDeepSeekChatCompletion({ message, history, sources, mentor, assistant, people, thinkingMode });
+  const session = existingSession || await createChatSession({ title: deriveChatSessionTitle(message) });
+  await appendChatSessionExchange({
+    sessionPath: session.path,
+    message,
+    response,
+    mentor,
+    assistant,
+    people,
+    sources
+  });
+
+  return {
+    answer: response.answer,
+    model: response.model,
+    thinkingMode: response.thinkingMode,
+    session,
+    mentor: mentor ? formatContextSource(mentor) : null,
+    assistant: assistant ? formatContextSource(assistant) : null,
+    people: people.map(formatContextSource),
+    sources: sources.map(formatChatSource)
+  };
+}
+
+async function answerOpenCodeChat(body) {
+  const message = normalizeChatMessage(body?.message);
+  const references = parseChatReferences(message, body);
+  const session = await ensureOpenCodeSession(body?.sessionPath, message);
+  const [skill, people, files] = await Promise.all([
+    references.skill ? getSkillPromptAny(references.skill) : Promise.resolve(null),
+    references.people.length ? getPeopleContexts(references.people) : Promise.resolve([]),
+    references.files.length ? getFileContexts(references.files) : Promise.resolve([])
+  ]);
+  const response = await callOpenCodeChatCompletion({
+    sessionId: session.id,
+    message,
+    thinkingMode: normalizeThinkingMode(body?.thinkingMode),
+    skill,
+    people,
+    files
+  });
+
+  return {
+    answer: response.answer,
+    model: response.model,
+    thinkingMode: response.thinkingMode,
+    session,
+    mentor: null,
+    assistant: skill ? formatContextSource(skill) : null,
+    people: people.map(formatContextSource),
+    sources: files.map(formatChatSource)
+  };
+}
+
+function normalizeOptionalChatSessionPath(sessionPath) {
+  const cleanPath = String(sessionPath || "").trim();
+  return cleanPath ? normalizeChatSessionPath(cleanPath) : "";
+}
+
+function getChatProvider() {
+  return CHAT_PROVIDER === "opencode" ? "opencode" : "deepseek";
+}
+
+function isOpenCodeChatProvider() {
+  return getChatProvider() === "opencode";
+}
+
+function normalizeOpenCodeSessionId(value) {
+  return String(value || "").trim().replace(/^opencode:/, "");
+}
+
+async function getChatModels() {
+  if (!isOpenCodeChatProvider()) {
+    return {
+      provider: "deepseek",
+      regularModel: DEEPSEEK_REGULAR_MODEL,
+      thinkingModel: DEEPSEEK_THINKING_MODEL,
+      models: [
+        { id: DEEPSEEK_REGULAR_MODEL, name: DEEPSEEK_REGULAR_MODEL },
+        { id: DEEPSEEK_THINKING_MODEL, name: DEEPSEEK_THINKING_MODEL }
+      ]
+    };
+  }
+
+  const models = await readOpenCodeModels().catch(() => []);
+  return {
+    provider: "opencode",
+    regularModel: OPENCODE_REGULAR_MODEL,
+    thinkingModel: OPENCODE_THINKING_MODEL,
+    models
+  };
+}
+
+async function summarizeChatCapture(body = {}) {
+  if (!isOpenCodeChatProvider() && !DEEPSEEK_API_KEY) {
+    throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable AI capture summaries.");
+  }
+  const category = normalizeCaptureSummaryCategory(body?.category);
+  const text = normalizeCaptureSummaryInput(body?.text);
+  const summary = isOpenCodeChatProvider()
+    ? await callOpenCodeCaptureSummary({ category, text })
+    : await callDeepSeekCaptureSummary({ category, text });
+  return {
+    category,
+    summary
+  };
+}
+
+function normalizeCaptureSummaryCategory(value) {
+  const category = String(value || "").trim().toLowerCase();
+  if (category === "idea" || category === "reflection" || category === "thought" || category === "log") {
+    return category;
+  }
+  throw httpError(400, "Capture summary category must be idea, reflection, thought, or log.");
+}
+
+function normalizeCaptureSummaryInput(value) {
+  const text = String(value || "").replace(/\n{3,}/g, "\n\n").trim();
+  if (!text) throw httpError(400, "Capture summary text is required.");
+  return text.slice(0, 8000);
+}
+
+function normalizeChatMessage(value) {
+  const message = String(value || "").trim();
+  if (!message) throw httpError(400, "Chat message is required.");
+  if (message.length > 4000) throw httpError(413, "Chat message is too long.");
+  return message;
+}
+
+function normalizeChatHistory(history) {
+  if (!Array.isArray(history)) return [];
+  return history
+    .map((item) => ({
+      role: item?.role === "assistant" ? "assistant" : "user",
+      content: String(item?.content || "").trim().slice(0, 3000)
+    }))
+    .filter((item) => item.content)
+    .slice(-CHAT_HISTORY_LIMIT);
+}
+
+function normalizeThinkingMode(value) {
+  return value === "enabled" || value === "disabled" ? value : DEEPSEEK_DEFAULT_THINKING;
+}
+
+function getOpenCodeModel(thinkingMode) {
+  return thinkingMode === "enabled" ? OPENCODE_THINKING_MODEL : OPENCODE_REGULAR_MODEL;
+}
+
+function getOpenCodeModelRef(thinkingMode) {
+  const { providerID, modelID } = parseOpenCodeModelId(getOpenCodeModel(thinkingMode));
+  if (!providerID || !modelID) {
+    throw httpError(500, "OpenCode model must use provider/model format.");
+  }
+  return {
+    providerID,
+    modelID
+  };
+}
+
+async function ensureChatSession(sessionPath, firstMessage = "") {
+  if (isOpenCodeChatProvider()) return ensureOpenCodeSession(sessionPath, firstMessage);
+  const cleanPath = String(sessionPath || "").trim();
+  if (cleanPath) {
+    return readChatSessionMetadata(cleanPath);
+  }
+  return createChatSession({ title: deriveChatSessionTitle(firstMessage) });
+}
+
+async function createChatSession(body = {}) {
+  if (isOpenCodeChatProvider()) return createOpenCodeSession(body);
+  const now = new Date();
+  const title = normalizeSessionTitle(body?.title) || "New chat";
+  const id = `chat-${now.toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}`;
+  const filename = `${id}.md`;
+  const relativePath = `${CHAT_SESSIONS_DIR}/${filename}`;
+  const filePath = resolveVaultRelativePath(relativePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const markdown = [
+    "---",
+    `id: ${id}`,
+    "type: chat-session",
+    `title: ${quoteYaml(title)}`,
+    `created: ${now.toISOString()}`,
+    `updated: ${now.toISOString()}`,
+    "status: active",
+    "source: second-brain-app",
+    "---",
+    "",
+    `# ${title}`,
+    "",
+    "## Conversation",
+    ""
+  ].join("\n");
+  await fs.writeFile(filePath, markdown, "utf8");
+  return {
+    id,
+    title,
+    path: relativePath,
+    created: now.toISOString(),
+    updated: now.toISOString()
+  };
+}
+
+async function listChatSessions(limit = 20) {
+  if (isOpenCodeChatProvider()) return listOpenCodeSessions(limit);
+  const dir = resolveVaultRelativePath(CHAT_SESSIONS_DIR);
+  let entries = [];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    return { sessions: [], dir: CHAT_SESSIONS_DIR };
+  }
+
+  const sessions = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".md")) continue;
+    try {
+      sessions.push(await readChatSessionMetadata(`${CHAT_SESSIONS_DIR}/${entry.name}`));
+    } catch {
+      // Ignore malformed session files in the list, but keep the folder usable.
+    }
+  }
+
+  sessions.sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")));
+  return { sessions: sessions.slice(0, Number(limit)), dir: CHAT_SESSIONS_DIR };
+}
+
+async function readChatSession(sessionPath) {
+  if (isOpenCodeChatProvider()) return readOpenCodeSession(sessionPath);
+  const session = await readChatSessionMetadata(sessionPath);
+  const markdown = await fs.readFile(resolveChatSessionPath(session.path), "utf8");
+  return {
+    session,
+    messages: parseChatSessionMessages(markdown)
+  };
+}
+
+async function readChatSessionMetadata(sessionPath) {
+  const relativePath = normalizeChatSessionPath(sessionPath);
+  const filePath = resolveChatSessionPath(relativePath);
+  const markdown = await fs.readFile(filePath, "utf8");
+  const { frontmatter, body } = splitFrontmatter(markdown);
+  const metadata = parseFrontmatter(frontmatter);
+  return {
+    id: metadata.id || hash(relativePath),
+    title: metadata.title || findFirstHeading(body) || path.basename(relativePath, ".md"),
+    path: relativePath,
+    created: metadata.created || "",
+    updated: metadata.updated || ""
+  };
+}
+
+async function ensureOpenCodeSession(sessionPath, firstMessage = "") {
+  const id = normalizeOpenCodeSessionId(sessionPath);
+  if (id) return getOpenCodeSession(id);
+  return createOpenCodeSession({ title: deriveChatSessionTitle(firstMessage) });
+}
+
+async function createOpenCodeSession(body = {}) {
+  const title = normalizeSessionTitle(body?.title) || "New chat";
+  return formatOpenCodeSession(await openCodeFetch("/session", {
+    method: "POST",
+    body: { title }
+  }));
+}
+
+async function listOpenCodeSessions(limit = 20) {
+  const sessions = await openCodeFetch("/session");
+  const list = Array.isArray(sessions) ? sessions : [];
+  const formatted = list
+    .map(formatOpenCodeSession)
+    .sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")))
+    .slice(0, Number(limit));
+  return { sessions: formatted, dir: "OpenCode /session" };
+}
+
+async function readOpenCodeSession(sessionPath) {
+  const session = await getOpenCodeSession(sessionPath);
+  const messages = await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`);
+  return {
+    session,
+    messages: formatOpenCodeMessages(messages)
+  };
+}
+
+async function getOpenCodeSession(sessionPath) {
+  const id = normalizeOpenCodeSessionId(sessionPath);
+  if (!id) throw httpError(400, "OpenCode session id is required.");
+  return formatOpenCodeSession(await openCodeFetch(`/session/${encodeURIComponent(id)}`));
+}
+
+async function readOpenCodeModels() {
+  const directModels = await openCodeFetch("/models").catch(() => openCodeFetch("/model").catch(() => null));
+  if (Array.isArray(directModels)) return directModels.map(formatDirectOpenCodeModel).filter(Boolean);
+  if (Array.isArray(directModels?.models)) return directModels.models.map(formatDirectOpenCodeModel).filter(Boolean);
+
+  const providers = await openCodeFetch("/provider");
+  const all = Array.isArray(providers?.all) ? providers.all : Array.isArray(providers) ? providers : [];
+  const models = [];
+  for (const provider of all) {
+    const providerID = provider.id || provider.providerID || provider.name;
+    const providerName = provider.name || providerID;
+    const providerModels = provider.models || provider.model || {};
+    if (Array.isArray(providerModels)) {
+      for (const model of providerModels) {
+        const modelID = model.id || model.modelID || model.name;
+        if (providerID && modelID) models.push(formatOpenCodeModel(providerID, providerName, modelID, model));
+      }
+      continue;
+    }
+    for (const [modelID, model] of Object.entries(providerModels)) {
+      models.push(formatOpenCodeModel(providerID, providerName, modelID, model || {}));
+    }
+  }
+  return models;
+}
+
+function formatDirectOpenCodeModel(model = {}) {
+  const id = model.id || model.model || "";
+  if (typeof model === "string") {
+    const parsed = parseOpenCodeModelId(model);
+    if (!parsed.providerID || !parsed.modelID) return null;
+    return {
+      id: `${parsed.providerID}/${parsed.modelID}`,
+      providerID: parsed.providerID,
+      modelID: parsed.modelID,
+      providerName: parsed.providerID,
+      name: parsed.modelID
+    };
+  }
+  if (!id && !(model.providerID && model.modelID)) return null;
+  const parsed = model.providerID && model.modelID
+    ? { providerID: model.providerID, modelID: model.modelID }
+    : parseOpenCodeModelId(id);
+  return {
+    id: `${parsed.providerID}/${parsed.modelID}`,
+    providerID: parsed.providerID,
+    modelID: parsed.modelID,
+    providerName: model.providerName || parsed.providerID,
+    name: model.name || model.label || parsed.modelID
+  };
+}
+
+function parseOpenCodeModelId(value) {
+  const [providerID, ...modelParts] = String(value || "").split("/");
+  return {
+    providerID,
+    modelID: modelParts.join("/")
+  };
+}
+
+function formatOpenCodeModel(providerID, providerName, modelID, model = {}) {
+  return {
+    id: `${providerID}/${modelID}`,
+    providerID,
+    modelID,
+    providerName,
+    name: model.name || model.label || modelID
+  };
+}
+
+function formatOpenCodeSession(session = {}) {
+  const id = String(session.id || session.sessionID || session.sessionId || "").trim();
+  if (!id) throw httpError(502, "OpenCode returned a session without an id.");
+  const title = session.title || session.name || "OpenCode chat";
+  const created = session.time?.created || session.created || session.createdAt || "";
+  const updated = session.time?.updated || session.updated || session.updatedAt || created;
+  return {
+    id,
+    title,
+    path: `opencode:${id}`,
+    created,
+    updated
+  };
+}
+
+function formatOpenCodeMessages(items) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((item) => {
+      const role = getOpenCodeMessageRole(item);
+      const content = extractOpenCodeText(item).trim();
+      if (!content) return null;
+      return {
+        id: `${role}-${item?.info?.id || hash(content).slice(0, 12)}`,
+        role,
+        content,
+        sources: [],
+        mentor: null,
+        assistant: null,
+        people: [],
+        thinkingMode: role === "assistant" ? "opencode" : "",
+        model: item?.info?.modelID || item?.info?.model || ""
+      };
+    })
+    .filter(Boolean);
+}
+
+async function callOpenCodeChatCompletion({ sessionId, message, thinkingMode, skill, people, files }) {
+  const modelRef = getOpenCodeModelRef(thinkingMode);
+  const prompt = buildOpenCodePrompt({ message, skill, people, files });
+  const body = {
+    model: modelRef,
+    parts: [{ type: "text", text: prompt }]
+  };
+  if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
+
+  const result = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message`, {
+    method: "POST",
+    body
+  });
+  return {
+    answer: extractOpenCodeText(result) || "OpenCode did not return a text response.",
+    model: `${modelRef.providerID}/${modelRef.modelID}`,
+    thinkingMode
+  };
+}
+
+async function callOpenCodeCaptureSummary({ category, text }) {
+  const session = await createOpenCodeSession({ title: "Capture summary" });
+  const modelRef = getOpenCodeModelRef("disabled");
+  const result = await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
+    method: "POST",
+    body: {
+      model: modelRef,
+      parts: [{
+        type: "text",
+        text: [
+          "Convert this assistant response into one or two plain sentences for an Obsidian fleeting note.",
+          "Capture the key concept, decision, or reusable insight. Do not include bullets, labels, source links, or commentary.",
+          `Capture category: ${category}`,
+          "",
+          clipText(text, 6000)
+        ].join("\n")
+      }]
+    }
+  });
+  const summary = normalizeAiCaptureSummary(extractOpenCodeText(result));
+  if (!summary) throw httpError(502, "OpenCode did not return a capture summary.");
+  return summary;
+}
+
+function buildOpenCodePrompt({ message, skill, people, files }) {
+  const contextBlocks = [];
+  if (skill) {
+    contextBlocks.push([
+      `Selected skill context (${skill.path}):`,
+      clipText(skill.content, 2200)
+    ].join("\n"));
+  }
+  if (people?.length) {
+    contextBlocks.push([
+      "Selected people context:",
+      people.map((person) => [
+        `${person.title || person.name} (${person.path}):`,
+        clipText(person.content, 1200)
+      ].join("\n")).join("\n\n")
+    ].join("\n"));
+  }
+  if (files?.length) {
+    contextBlocks.push([
+      "Selected file context:",
+      files.map((file) => [
+        `${file.title} (${file.path}):`,
+        clipText(file.content || file.snippet, 1400)
+      ].join("\n")).join("\n\n")
+    ].join("\n"));
+  }
+
+  if (!contextBlocks.length) return message;
+  return [
+    message,
+    "",
+    "---",
+    "",
+    contextBlocks.join("\n\n")
+  ].join("\n");
+}
+
+function getOpenCodeMessageRole(item = {}) {
+  const role = String(item.info?.role || item.info?.type || item.role || item.type || "").toLowerCase();
+  return role.includes("assistant") ? "assistant" : "user";
+}
+
+function extractOpenCodeText(item = {}) {
+  const parts = Array.isArray(item.parts) ? item.parts : [];
+  return parts
+    .filter((part) => String(part.type || "").toLowerCase() === "text" || typeof part.text === "string")
+    .map((part) => part.text || part.content || "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+async function openCodeFetch(endpoint, { method = "GET", body = null } = {}) {
+  const headers = { "Accept": "application/json" };
+  if (body !== null) headers["Content-Type"] = "application/json";
+  if (OPENCODE_SERVER_PASSWORD) {
+    headers.Authorization = `Basic ${Buffer.from(`${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}`).toString("base64")}`;
+  }
+
+  let response;
+  try {
+    response = await fetch(`${OPENCODE_BASE_URL}${endpoint}`, {
+      method,
+      headers,
+      body: body === null ? undefined : JSON.stringify(body)
+    });
+  } catch {
+    throw httpError(503, `OpenCode server is not reachable at ${OPENCODE_BASE_URL}. Start opencode serve and try again.`);
+  }
+
+  if (response.status === 204) return {};
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw httpError(response.status, data.error?.message || data.message || `OpenCode request failed: ${method} ${endpoint}`);
+  }
+  return data;
+}
+
+async function appendChatSessionExchange({ sessionPath, message, response, mentor, assistant, people, sources }) {
+  const relativePath = normalizeChatSessionPath(sessionPath);
+  const filePath = resolveChatSessionPath(relativePath);
+  const now = new Date();
+  const existing = await fs.readFile(filePath, "utf8");
+  const entry = formatChatSessionExchange({ date: now, message, response, mentor, assistant, people, sources });
+  const updated = updateSessionFrontmatter(existing, now.toISOString());
+  await fs.writeFile(filePath, `${updated.trimEnd()}\n\n${entry}\n`, "utf8");
+}
+
+function formatChatSessionExchange({ date, message, response, mentor, assistant, people, sources }) {
+  const contextLines = [
+    mentor ? `mentor:: [[${mentor.path}|${mentor.title || mentor.name || "mentor"}]]` : "",
+    mentor?.autoSelected ? "mentor_selection:: auto" : "",
+    assistant ? `assistant:: [[${assistant.path}|${assistant.title || assistant.name || "assistant"}]]` : "",
+    assistant?.autoSelected ? "assistant_selection:: auto" : "",
+    ...(people || []).map((person) => `person:: [[${person.path}|${person.title || person.name || "person"}]]`),
+    ...(sources || []).slice(0, 8).map((source) => `source:: [[${source.path}|${source.title || source.path}]]`)
+  ].filter(Boolean);
+
+  return [
+    `### ${formatTimestamp(date)} — User`,
+    "",
+    message.trim(),
+    "",
+    `### ${formatTimestamp(date)} — Assistant`,
+    "",
+    `model:: ${response.model}`,
+    `thinking:: ${response.thinkingMode}`,
+    ...contextLines,
+    "",
+    response.answer.trim()
+  ].join("\n");
+}
+
+function parseChatSessionMessages(markdown) {
+  const lines = markdown.split(/\r?\n/);
+  const messages = [];
+  let current = null;
+
+  for (const line of lines) {
+    const heading = line.match(/^###\s+(.+?)\s+—\s+(User|Assistant)\s*$/i);
+    if (heading) {
+      if (current) messages.push(finalizeSessionMessage(current));
+      current = {
+        role: heading[2].toLowerCase() === "user" ? "user" : "assistant",
+        content: [],
+        meta: []
+      };
+      continue;
+    }
+    if (current) current.content.push(line);
+  }
+  if (current) messages.push(finalizeSessionMessage(current));
+  return messages;
+}
+
+function finalizeSessionMessage(message) {
+  const contentLines = [];
+  const meta = {};
+  for (const line of message.content) {
+    const match = line.match(/^([A-Za-z0-9_-]+)::\s*(.+)$/);
+    if (message.role === "assistant" && match) {
+      const key = match[1];
+      if (!meta[key]) meta[key] = [];
+      meta[key].push(match[2]);
+      continue;
+    }
+    contentLines.push(line);
+  }
+  const content = contentLines.join("\n").trim();
+  return {
+    id: `${message.role}-${hash(content).slice(0, 12)}`,
+    role: message.role,
+    content,
+    model: meta.model?.[0] || "",
+    thinkingMode: meta.thinking?.[0] || "",
+    sources: [],
+    mentor: null,
+    assistant: null,
+    people: []
+  };
+}
+
+function updateSessionFrontmatter(markdown, updatedIso) {
+  if (!markdown.startsWith("---")) return markdown;
+  const end = markdown.indexOf("\n---", 3);
+  if (end === -1) return markdown;
+  const frontmatter = markdown.slice(0, end);
+  const rest = markdown.slice(end);
+  const nextFrontmatter = /^updated:\s*.*$/m.test(frontmatter)
+    ? frontmatter.replace(/^updated:\s*.*$/m, `updated: ${updatedIso}`)
+    : `${frontmatter}\nupdated: ${updatedIso}`;
+  return `${nextFrontmatter}${rest}`;
+}
+
+function deriveChatSessionTitle(message) {
+  const clean = String(message || "")
+    .replace(/[#/@][A-Za-z0-9_-]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean ? clipText(clean, 72) : `Chat ${formatTimestamp(new Date())}`;
+}
+
+function normalizeSessionTitle(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 90);
+}
+
+function parseChatReferences(message, body = {}) {
+  const text = String(message || "");
+  const mentor = firstLookupName([
+    body?.mentor,
+    ...(isOpenCodeChatProvider() ? [] : Array.from(text.matchAll(/(?:^|\s)#([A-Za-z0-9_-]+)/g), (match) => match[1]))
+  ]);
+  const skill = firstLookupName([
+    body?.skill,
+    body?.assistant,
+    ...Array.from(text.matchAll(/(?:^|\s)\/([A-Za-z0-9_-]+)/g), (match) => match[1])
+  ]);
+  const assistant = skill;
+  const files = uniqueLookupNames([
+    ...(Array.isArray(body?.files) ? body.files : []),
+    ...(isOpenCodeChatProvider() ? Array.from(text.matchAll(/(?:^|\s)#([A-Za-z0-9_-]+)/g), (match) => match[1]) : [])
+  ]);
+  const people = uniqueLookupNames([
+    ...(Array.isArray(body?.people) ? body.people : []),
+    ...Array.from(text.matchAll(/(?:^|\s)@([A-Za-z0-9_-]+)/g), (match) => match[1])
+  ]);
+
+  return { mentor, assistant, skill, people, files };
+}
+
+function firstLookupName(values) {
+  return uniqueLookupNames(values)[0] || "";
+}
+
+function uniqueLookupNames(values) {
+  const seen = new Set();
+  const names = [];
+  for (const value of values) {
+    const normalized = normalizeLookupName(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    names.push(normalized);
+  }
+  return names.slice(0, 5);
+}
+
+function normalizeLookupName(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^[@#/]+/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "");
+}
+
+async function getSkillPrompt(type, name) {
+  if (!type || !name) return null;
+  await ensureIndexSchema();
+  const rows = await dbQuery(`
+    SELECT note_id, path, title, type, name, content, updated
+    FROM notes_metadata
+    WHERE LOWER(COALESCE(type, '')) = ${sqlValue(type)}
+    ORDER BY datetime(updated) DESC
+  `);
+  return rows.find((row) => matchesLookup(row, name)) || null;
+}
+
+async function getSkillPromptAny(name) {
+  if (!name) return null;
+  const vaultSkill = (await readVaultSkills()).find((row) => matchesLookup(row, name));
+  if (vaultSkill) return vaultSkill;
+
+  await ensureIndexSchema();
+  const rows = await dbQuery(`
+    SELECT note_id, path, title, type, name, content, updated
+    FROM notes_metadata
+    WHERE LOWER(COALESCE(type, '')) IN ('mentor', 'assistant')
+    ORDER BY datetime(updated) DESC
+  `);
+  return rows.find((row) => matchesLookup(row, name)) || null;
+}
+
+async function routeChatSkills(message, references) {
+  const [assistantRows, mentorRows] = await Promise.all([
+    references.assistant ? Promise.resolve([]) : getReferenceRows("assistant"),
+    references.mentor ? Promise.resolve([]) : getReferenceRows("mentor")
+  ]);
+  return {
+    assistant: selectAutoSkill(assistantRows, message, "assistant"),
+    mentor: selectAutoSkill(mentorRows, message, "mentor")
+  };
+}
+
+function selectAutoSkill(rows, message, kind) {
+  const terms = extractSkillRouteTerms(message);
+  if (!rows.length || !terms.length) return null;
+
+  const threshold = kind === "assistant" ? 5 : 7;
+  const scored = rows
+    .map((row) => ({ row, score: scoreSkillRoute(row, terms) }))
+    .filter((item) => item.score >= threshold)
+    .sort((a, b) => b.score - a.score || suggestionSortValue(a.row).localeCompare(suggestionSortValue(b.row)));
+
+  const [best, second] = scored;
+  if (!best) return null;
+  if (second && best.score - second.score < 2 && best.score < threshold + 4) return null;
+  return {
+    ...best.row,
+    autoSelected: true,
+    routeScore: best.score
+  };
+}
+
+function extractSkillRouteTerms(message) {
+  const routeStopWords = new Set([
+    "chat", "give", "help", "make", "need", "please", "show", "tell", "use", "using", "want", "you", "your"
+  ]);
+  return extractSearchTerms(message)
+    .map((term) => slugifyLookup(term))
+    .filter((term) => term.length > 2 && !routeStopWords.has(term))
+    .slice(0, 12);
+}
+
+function scoreSkillRoute(row, terms) {
+  const nameText = [
+    row.name,
+    row.title,
+    row.description,
+    path.basename(row.path || "", ".md"),
+    skillFolderName(row.path || "")
+  ].map(slugifyLookup).filter(Boolean);
+  const pathText = slugifyLookup(row.path || "");
+  const contentText = slugifyLookup(row.content || "");
+
+  return terms.reduce((score, term) => {
+    let next = score;
+    if (nameText.some((value) => value === term)) next += 10;
+    if (nameText.some((value) => value.includes(term) || term.includes(value))) next += 5;
+    if (pathText.includes(term)) next += 2;
+    if (contentText.includes(term)) next += Math.min(countOccurrences(contentText, term), 4);
+    return next;
+  }, 0);
+}
+
+async function getPeopleContexts(names) {
+  await ensureIndexSchema();
+  const rows = await dbQuery(`
+    SELECT note_id, path, title, type, name, content, updated
+    FROM notes_metadata
+    WHERE LOWER(COALESCE(type, '')) = 'people'
+      AND (
+        path LIKE '2.Areas/Personal/People/%'
+        OR path LIKE '3.Resources/People/%'
+      )
+    ORDER BY datetime(updated) DESC
+  `);
+  return names
+    .map((name) => rows.find((row) => matchesLookup(row, name)))
+    .filter(Boolean);
+}
+
+async function getChatReferenceSuggestions(kind, query) {
+  await ensureIndexSchema();
+  const normalizedKind = normalizeReferenceKind(kind);
+  if (!normalizedKind) throw httpError(400, "Reference kind must be mentor, assistant, skill, people, or file.");
+  const cleanQuery = normalizeLookupName(query);
+  if (normalizedKind === "skill") return getChatSkills(query);
+  if (normalizedKind === "file") return getVaultFileSuggestions(query);
+  const rows = await getReferenceRows(normalizedKind);
+  const suggestions = rows
+    .filter((row) => matchesSuggestionQuery(row, cleanQuery))
+    .sort((a, b) => suggestionSortValue(a).localeCompare(suggestionSortValue(b)))
+    .slice(0, 10)
+    .map((row) => ({
+      id: row.note_id,
+      kind: normalizedKind,
+      title: row.title,
+      name: row.name || row.title,
+      token: slugifyLookup(row.name || row.title || path.basename(row.path || "", ".md")),
+      path: row.path
+    }));
+  return { kind: normalizedKind, query: cleanQuery, suggestions };
+}
+
+async function getReferenceRows(kind) {
+  if (kind === "skill") {
+    return dbQuery(`
+      SELECT note_id, path, title, type, name, content, updated
+      FROM notes_metadata
+      WHERE LOWER(COALESCE(type, '')) IN ('mentor', 'assistant')
+      ORDER BY datetime(updated) DESC
+    `);
+  }
+  if (kind === "mentor" || kind === "assistant") {
+    return dbQuery(`
+      SELECT note_id, path, title, type, name, content, updated
+      FROM notes_metadata
+      WHERE LOWER(COALESCE(type, '')) = ${sqlValue(kind)}
+      ORDER BY datetime(updated) DESC
+    `);
+  }
+  return dbQuery(`
+    SELECT note_id, path, title, type, name, updated
+    FROM notes_metadata
+    WHERE LOWER(COALESCE(type, '')) = 'people'
+      AND (
+        path LIKE '2.Areas/Personal/People/%'
+        OR path LIKE '3.Resources/People/%'
+      )
+    ORDER BY datetime(updated) DESC
+  `);
+}
+
+async function getChatSkills(query = "") {
+  await ensureIndexSchema();
+  const cleanQuery = normalizeLookupName(query);
+  const rows = mergeSkillRows(
+    await readVaultSkills(),
+    isOpenCodeChatProvider() ? await readOpenCodeSkills().catch(() => []) : [],
+    await getReferenceRows("skill")
+  );
+  const suggestions = rows
+    .filter((row) => matchesSuggestionQuery(row, cleanQuery))
+    .sort((a, b) => suggestionSortValue(a).localeCompare(suggestionSortValue(b)))
+    .map((row) => ({
+      id: row.note_id || row.id || row.name || row.title,
+      kind: "skill",
+      title: row.title,
+      name: row.name || row.title,
+      token: slugifyLookup(row.name || row.title || path.basename(row.path || "", ".md")),
+      path: row.path || "",
+      type: row.type || null
+    }));
+  return { kind: "skill", query: cleanQuery, suggestions };
+}
+
+async function readVaultSkills() {
+  const root = resolveVaultRelativePath(SKILL_ROOT);
+  let entries = [];
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+
+  const skills = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const relativePath = `${SKILL_ROOT}/${entry.name}/SKILL.md`;
+    const filePath = resolveVaultRelativePath(relativePath);
+    try {
+      const markdown = await fs.readFile(filePath, "utf8");
+      const stat = await fs.stat(filePath);
+      skills.push(parseSkillMarkdown({ relativePath, markdown, stat }));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  return skills;
+}
+
+function parseSkillMarkdown({ relativePath, markdown, stat }) {
+  const { frontmatter, body } = splitFrontmatter(markdown);
+  const metadata = parseFrontmatter(frontmatter);
+  const folderName = skillFolderName(relativePath);
+  const name = metadata.name || folderName;
+  const title = metadata.title || name || findFirstHeading(body) || path.basename(path.dirname(relativePath));
+  const content = markdown.trim();
+  return {
+    note_id: hash(relativePath),
+    id: hash(relativePath),
+    kind: "skill",
+    path: relativePath,
+    title,
+    name,
+    type: metadata.type || "",
+    description: metadata.description || "",
+    content,
+    updated: stat.mtime.toISOString()
+  };
+}
+
+function mergeSkillRows(...skillGroups) {
+  const merged = [];
+  const seen = new Set();
+  for (const group of skillGroups) {
+    for (const skill of group || []) {
+      const key = slugifyLookup(skill.name || skill.title || skill.path || skill.id);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(skill);
+    }
+  }
+  return merged;
+}
+
+async function readOpenCodeSkills() {
+  const data = await openCodeFetch("/skill");
+  const list = Array.isArray(data) ? data : data.skills || data.all || [];
+  return list.map((skill) => ({
+    id: skill.id || skill.name,
+    kind: "skill",
+    title: skill.title || skill.name,
+    name: skill.name || skill.title,
+    path: skill.path || "",
+    description: skill.description || ""
+  }));
+}
+
+async function getVaultFileSuggestions(query = "") {
+  await ensureIndexSchema();
+  const cleanQuery = normalizeLookupName(query);
+  const rows = await dbQuery(`
+    SELECT note_id, path, title, type, name, updated
+    FROM notes_metadata
+    ORDER BY datetime(updated) DESC
+    LIMIT 300
+  `);
+  const suggestions = rows
+    .filter((row) => matchesSuggestionQuery(row, cleanQuery))
+    .sort((a, b) => suggestionSortValue(a).localeCompare(suggestionSortValue(b)))
+    .slice(0, 20)
+    .map((row) => ({
+      id: row.note_id,
+      kind: "file",
+      title: row.title,
+      name: row.title,
+      token: slugifyLookup(row.title || path.basename(row.path || "", ".md")),
+      path: row.path
+    }));
+  return { kind: "file", query: cleanQuery, suggestions };
+}
+
+async function getFileContexts(names) {
+  await ensureIndexSchema();
+  const rows = await dbQuery(`
+    SELECT note_id, path, title, type, name, para, project, updated, snippet, content
+    FROM notes_metadata
+    ORDER BY datetime(updated) DESC
+    LIMIT 500
+  `);
+  return names
+    .map((name) => rows.find((row) => matchesLookup(row, name)))
+    .filter(Boolean);
+}
+
+function mergeChatSources(sources) {
+  const seen = new Set();
+  const merged = [];
+  for (const source of sources) {
+    if (!source?.path || seen.has(source.path)) continue;
+    seen.add(source.path);
+    merged.push(source);
+  }
+  return merged;
+}
+
+function normalizeReferenceKind(kind) {
+  if (kind === "mentor" || kind === "assistant" || kind === "skill" || kind === "people" || kind === "file") return kind;
+  return "";
+}
+
+function matchesSuggestionQuery(row, query) {
+  if (!query) return true;
+  return [
+    row.name,
+    row.title,
+    path.basename(row.path || "", ".md"),
+    skillFolderName(row.path || "")
+  ].some((value) => slugifyLookup(value).includes(query));
+}
+
+function suggestionSortValue(row) {
+  return slugifyLookup(row.name || row.title || row.path);
+}
+
+function matchesLookup(row, lookupName) {
+  const candidates = [
+    row.name,
+    row.title,
+    path.basename(row.path || "", ".md"),
+    skillFolderName(row.path || "")
+  ];
+  const target = slugifyLookup(lookupName);
+  return candidates.some((candidate) => slugifyLookup(candidate) === target);
+}
+
+function skillFolderName(relativePath) {
+  const segments = String(relativePath || "").split("/");
+  const skillRoot = SKILL_ROOT.split("/");
+  return segments[0] === skillRoot[0] && segments[1] === skillRoot[1] ? segments[2] || "" : "";
+}
+
+function slugifyLookup(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+async function retrieveChatSources(message, limit = 6) {
+  await ensureIndexSchema();
+  const terms = extractSearchTerms(message);
+  if (!terms.length) {
+    const recent = await dbQuery(`
+      SELECT note_id, path, title, type, name, para, project, updated, snippet, content
+      FROM notes_metadata
+      WHERE LOWER(COALESCE(type, '')) NOT IN ('mentor', 'assistant')
+      ORDER BY datetime(updated) DESC
+      LIMIT ${Number(limit)}
+    `);
+    return recent.map((row) => ({ ...row, score: 0, snippet: row.snippet || "" }));
+  }
+
+  const conditions = terms
+    .map((term) => `LOWER(title || ' ' || path || ' ' || content) LIKE ${sqlValue(`%${escapeLike(term)}%`)} ESCAPE '\\'`)
+    .join(" OR ");
+  const rows = await dbQuery(`
+    SELECT note_id, path, title, type, name, para, project, updated, snippet, content
+    FROM notes_metadata
+    WHERE LOWER(COALESCE(type, '')) NOT IN ('mentor', 'assistant')
+      AND (${conditions})
+    ORDER BY datetime(updated) DESC
+    LIMIT ${Number(limit) * 6}
+  `);
+
+  return rows
+    .map((row) => {
+      const haystack = `${row.title} ${row.path} ${row.content}`.toLowerCase();
+      const score = terms.reduce((total, term) => total + countOccurrences(haystack, term), 0);
+      return {
+        ...row,
+        score,
+        snippet: makeSearchSnippet(row.content || row.snippet || "", terms)
+      };
+    })
+    .sort((a, b) => b.score - a.score || String(b.updated).localeCompare(String(a.updated)))
+    .slice(0, limit);
+}
+
+function extractSearchTerms(message) {
+  const stopWords = new Set([
+    "about", "after", "again", "also", "and", "are", "can", "could", "for", "from", "have", "how",
+    "into", "like", "notes", "that", "the", "this", "through", "what", "when", "where", "with", "would"
+  ]);
+  return Array.from(new Set(
+    String(message || "")
+      .toLowerCase()
+      .replace(/#[a-z0-9_-]+/g, " ")
+      .replace(/\/[a-z0-9_-]+/g, " ")
+      .replace(/@[a-z0-9_-]+/g, " ")
+      .replace(/[^a-z0-9/_-]+/g, " ")
+      .split(/\s+/)
+      .map((term) => term.trim())
+      .filter((term) => term.length > 2 && !stopWords.has(term))
+  )).slice(0, 10);
+}
+
+async function callDeepSeekChatCompletion({ message, history, sources, mentor, assistant, people, thinkingMode }) {
+  const prompt = buildChatPrompt({ message, history, sources, mentor, assistant, people });
+  const model = getDeepSeekModel(thinkingMode);
+  const endpoint = `${DEEPSEEK_BASE_URL}/chat/completions`;
+  const headers = {
+    "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+    "Content-Type": "application/json"
+  };
+  if (DEEPSEEK_TRAINING_OPT_OUT) {
+    headers.opt_out = "training";
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: "system",
+          content: buildChatInstructions({ mentor, assistant, people })
+        },
+        {
+          role: "user",
+          content: prompt
+        }
+      ],
+      thinking: { type: thinkingMode },
+      ...(thinkingMode === "enabled" ? { reasoning_effort: DEEPSEEK_REASONING_EFFORT } : {})
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw httpError(response.status, data.error?.message || "DeepSeek request failed.");
+  }
+
+  return {
+    model,
+    thinkingMode,
+    answer: extractDeepSeekText(data) || "I could not produce a response."
+  };
+}
+
+async function callDeepSeekCaptureSummary({ category, text }) {
+  const endpoint = `${DEEPSEEK_BASE_URL}/chat/completions`;
+  const headers = {
+    "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+    "Content-Type": "application/json"
+  };
+  if (DEEPSEEK_TRAINING_OPT_OUT) {
+    headers.opt_out = "training";
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: DEEPSEEK_REGULAR_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You convert assistant responses into concise Obsidian fleeting-note captures.",
+            "Return only one or two plain sentences.",
+            "Capture the key concept, decision, or reusable insight.",
+            "Do not include markdown bullets, headings, labels, quotes, source links, or commentary.",
+            "Keep it under 60 words."
+          ].join(" ")
+        },
+        {
+          role: "user",
+          content: [
+            `Capture category: ${category}`,
+            "",
+            "Assistant response:",
+            clipText(text, 6000)
+          ].join("\n")
+        }
+      ],
+      thinking: { type: "disabled" }
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw httpError(response.status, data.error?.message || "DeepSeek capture summary request failed.");
+  }
+
+  const summary = normalizeAiCaptureSummary(extractDeepSeekText(data));
+  if (!summary) throw httpError(502, "DeepSeek did not return a capture summary.");
+  return summary;
+}
+
+function normalizeAiCaptureSummary(value) {
+  return String(value || "")
+    .replace(/^["']|["']$/g, "")
+    .replace(/^#+\s+/, "")
+    .replace(/^[-*]\s+/, "")
+    .replace(/^(idea|reflection|thought|log|summary)\s*:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+function getDeepSeekModel(thinkingMode) {
+  return thinkingMode === "enabled" ? DEEPSEEK_THINKING_MODEL : DEEPSEEK_REGULAR_MODEL;
+}
+
+function buildChatInstructions({ mentor, assistant, people }) {
+  const mentorLine = mentor
+    ? `${mentor.autoSelected ? "A mentor perspective was automatically selected" : "Use this mentor perspective when helpful"}: ${mentor.title || mentor.name || "mentor"}.`
+    : "Use your default PKM thinking style.";
+  const assistantLine = assistant
+    ? `${assistant.autoSelected ? "An assistant skill was automatically selected" : "Apply this assistant skill when helpful"}: ${assistant.title || assistant.name || "assistant"}.`
+    : "No assistant skill is selected.";
+  const peopleLine = people?.length
+    ? "Use selected people notes as relationship/context memory; do not overstate uncertain or inferred facts."
+    : "No people notes are selected.";
+  return [
+    "You are a local-first PKM thinking assistant for an Obsidian Markdown vault.",
+    "Use retrieved vault context when it is relevant, but do not pretend it contains facts it does not contain.",
+    "Be concise, practical, and transparent. If context is weak or missing, say so.",
+    "Do not claim to have written or changed vault files.",
+    mentorLine,
+    assistantLine,
+    peopleLine
+  ].join(" ");
+}
+
+function buildChatPrompt({ message, history, sources, mentor, assistant, people }) {
+  const historyText = history.length
+    ? history.map((item) => `${item.role.toUpperCase()}: ${item.content}`).join("\n\n")
+    : "No prior messages in this browser session.";
+  const mentorText = mentor
+    ? `Mentor note (${mentor.path}):\n${clipText(mentor.content, 1800)}`
+    : "No mentor selected.";
+  const assistantText = assistant
+    ? `Assistant skill (${assistant.path}):\n${clipText(assistant.content, 2200)}`
+    : "No assistant selected.";
+  const peopleText = people?.length
+    ? people.map((person) => `Person note (${person.path}):\n${clipText(person.content, 1400)}`).join("\n\n")
+    : "No people selected.";
+  const sourceText = sources.length
+    ? sources.map((source, index) => [
+      `[${index + 1}] ${source.title} (${source.path})`,
+      clipText(source.snippet || source.content, 1000)
+    ].join("\n")).join("\n\n")
+    : "No relevant indexed notes were found.";
+
+  return [
+    "Recent conversation:",
+    historyText,
+    "",
+    "Mentor:",
+    mentorText,
+    "",
+    "Assistant:",
+    assistantText,
+    "",
+    "People:",
+    peopleText,
+    "",
+    "Relevant vault notes:",
+    sourceText,
+    "",
+    "User question:",
+    message
+  ].join("\n");
+}
+
+function extractDeepSeekText(data) {
+  return (data.choices || [])
+    .map((choice) => choice.message?.content || "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function formatChatSource(source) {
+  return {
+    id: source.note_id,
+    title: source.title,
+    path: source.path,
+    para: source.para || null,
+    project: source.project || null,
+    updated: source.updated,
+    snippet: clipText(source.snippet || source.content || "", 360),
+    score: Number(source.score || 0)
+  };
+}
+
+function formatContextSource(mentor) {
+  return {
+    id: mentor.note_id,
+    title: mentor.title,
+    type: mentor.type || null,
+    name: mentor.name || null,
+    path: mentor.path,
+    autoSelected: Boolean(mentor.autoSelected)
+  };
+}
+
+function clipText(value, length) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > length ? `${text.slice(0, length - 3)}...` : text;
 }
 
 async function getDashboard() {
@@ -989,11 +2403,19 @@ async function collectMarkdownFiles(dirPath, files, skipped) {
 }
 
 function shouldSkipVaultPath(relativePath, entry) {
+  if (entry.isDirectory() && isSkillDirectoryPrefix(relativePath)) return false;
+  if (entry.isDirectory() && isPeopleDirectoryPrefix(relativePath)) return false;
   if (entry.isDirectory() && (SKIPPED_DIRS.has(entry.name) || entry.name.startsWith("."))) return true;
   return shouldSkipRelativeVaultPath(relativePath);
 }
 
 function shouldSkipRelativeVaultPath(relativePath) {
+  if (isSkillMarkdownPath(relativePath)) {
+    return matchesIndexIgnore(relativePath) || SENSITIVE_PATH_PATTERN.test(relativePath);
+  }
+  if (isPeopleMarkdownPath(relativePath)) {
+    return SENSITIVE_PATH_PATTERN.test(relativePath);
+  }
   const segments = String(relativePath || "").split("/").filter(Boolean);
   if (segments.some((segment) => SKIPPED_DIRS.has(segment) || segment.startsWith("."))) return true;
   if (segments.some((segment) => SKIPPED_PATH_PARTS.has(segment.toLowerCase()))) return true;
@@ -1001,21 +2423,66 @@ function shouldSkipRelativeVaultPath(relativePath) {
   return SENSITIVE_PATH_PATTERN.test(relativePath);
 }
 
+function isSkillDirectoryPrefix(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  return normalized === ".agents" || normalized === SKILL_ROOT || normalized.startsWith(`${SKILL_ROOT}/`);
+}
+
+function isSkillMarkdownPath(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/");
+  return normalized.startsWith(`${SKILL_ROOT}/`) && normalized.toLowerCase().endsWith(".md");
+}
+
+function isPeopleDirectoryPrefix(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  return [
+    "2.Areas",
+    "2.Areas/Personal",
+    "2.Areas/Personal/People",
+    "3.Resources",
+    "3.Resources/People"
+  ].some((prefix) => normalized === prefix || prefix.startsWith(`${normalized}/`) || normalized.startsWith(`${prefix}/`));
+}
+
+function isPeopleMarkdownPath(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/");
+  return (
+    normalized.startsWith("2.Areas/Personal/People/") ||
+    normalized.startsWith("3.Resources/People/")
+  ) && normalized.toLowerCase().endsWith(".md");
+}
+
+function shouldIndexNote(note) {
+  const type = String(note.type || "").toLowerCase();
+  if (isSkillMarkdownPath(note.path)) {
+    return type === "mentor" || type === "assistant";
+  }
+  if (isPeopleMarkdownPath(note.path)) {
+    return type === "people";
+  }
+  return true;
+}
+
 function parseMarkdownNote({ filePath, markdown, stat }) {
   const relativePath = toVaultPath(filePath);
   const { frontmatter, body } = splitFrontmatter(markdown);
   const metadata = parseFrontmatter(frontmatter);
-  const title = metadata.title || findFirstHeading(body) || path.basename(filePath, ".md");
+  const isSkill = isSkillMarkdownPath(relativePath);
+  const title = metadata.title || metadata.name || findFirstHeading(body) || skillFolderName(relativePath) || path.basename(filePath, ".md");
+  const type = metadata.type || "";
+  const name = metadata.name || (isSkill ? skillFolderName(relativePath) : "");
   const para = metadata.para || inferPara(relativePath);
   const project = metadata.project || inferProject(relativePath, para);
   const headings = JSON.stringify(extractHeadings(body));
   const tags = JSON.stringify(extractTags(markdown, metadata.tags));
-  const content = normalizeMarkdown(body);
+  const content = normalizeMarkdown([metadata.description, body].filter(Boolean).join("\n\n"));
 
   return {
     noteId: hash(relativePath),
     path: relativePath,
     title,
+    type,
+    name,
     para,
     project,
     created: metadata.created || null,
@@ -1082,10 +2549,33 @@ function splitFrontmatter(markdown) {
 
 function parseFrontmatter(frontmatter) {
   const result = {};
-  for (const line of frontmatter.split(/\r?\n/)) {
+  const lines = frontmatter.split(/\r?\n/);
+  let inMetadata = false;
+  for (const line of lines) {
+    const metadataStart = line.match(/^metadata:\s*$/);
+    if (metadataStart) {
+      inMetadata = true;
+      continue;
+    }
+
+    if (inMetadata) {
+      if (/^[A-Za-z0-9_-]+:\s*/.test(line)) inMetadata = false;
+      const nestedType = line.match(/^\s*(?:-\s*)?type:\s*(.*)$/);
+      if (nestedType) {
+        result.type = nestedType[1].replace(/^["']|["']$/g, "").trim();
+        continue;
+      }
+    }
+
     const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
     if (!match) continue;
-    result[match[1]] = match[2].replace(/^["']|["']$/g, "").trim();
+    const key = match[1];
+    const value = match[2].replace(/^["']|["']$/g, "").trim();
+    if (key === "metadata.type") {
+      result.type = value;
+      continue;
+    }
+    result[key] = value;
   }
   return result;
 }
@@ -1150,6 +2640,10 @@ function stripMarkdown(value) {
     .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
     .replace(/[*_`#]/g, "")
     .trim();
+}
+
+function quoteYaml(value) {
+  return JSON.stringify(String(value || ""));
 }
 
 function cleanTaskText(value) {
@@ -1219,6 +2713,41 @@ function toVaultPath(filePath) {
   return path.relative(VAULT_PATH, filePath).split(path.sep).join("/");
 }
 
+function normalizeVaultRelativeDir(relativePath) {
+  const normalized = String(relativePath || "")
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+  if (!normalized || normalized.includes("..")) {
+    throw new Error("Invalid vault relative directory.");
+  }
+  return normalized;
+}
+
+function resolveVaultRelativePath(relativePath) {
+  const normalized = String(relativePath || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!normalized || normalized.includes("..")) throw httpError(400, "Invalid vault path.");
+  const root = path.resolve(VAULT_PATH);
+  const filePath = path.resolve(root, normalized);
+  if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`)) {
+    throw httpError(400, "Path is outside the configured vault.");
+  }
+  return filePath;
+}
+
+function normalizeChatSessionPath(sessionPath) {
+  const normalized = String(sessionPath || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!normalized.endsWith(".md")) throw httpError(400, "Chat session path must be a Markdown file.");
+  if (!normalized.startsWith(`${CHAT_SESSIONS_DIR}/`)) {
+    throw httpError(400, "Chat session path is outside the configured sessions folder.");
+  }
+  return normalized;
+}
+
+function resolveChatSessionPath(sessionPath) {
+  return resolveVaultRelativePath(normalizeChatSessionPath(sessionPath));
+}
+
 function getCurrentMonthlyCaptureFile() {
   return path.join(getFleetingDir(), `${getCurrentMonthSlug()}.md`);
 }
@@ -1277,7 +2806,8 @@ async function appendCapture(body) {
   const date = new Date();
   const dayHeading = formatDayHeading(date);
   const todo = category === "todo" ? normalizeTodoCaptureMetadata(body) : null;
-  const entry = formatCaptureEntry({ date, category, text, todo });
+  const source = normalizeCaptureSource(body?.source || body?.sessionPath);
+  const entry = formatCaptureEntry({ date, category, text, todo, source });
   const filePath = getCurrentMonthlyCaptureFile();
 
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -1298,6 +2828,7 @@ async function appendCapture(body) {
 async function updateCapture(body) {
   const content = String(body?.content || "").replace(/\r\n/g, "\n").trimEnd();
   const text = normalizeEditText(body?.text);
+  const category = normalizeOptionalCaptureCategory(body?.category);
   if (!content) throw httpError(400, "Capture content is required.");
 
   const filePath = getCurrentMonthlyCaptureFile();
@@ -1309,7 +2840,7 @@ async function updateCapture(body) {
   const startIndex = findMarkdownBlock(lines, contentLines);
   if (startIndex < 0) throw httpError(404, "Capture was not found in the current monthly file.");
 
-  const replacement = replaceCaptureText(contentLines, text);
+  const replacement = replaceCaptureText(contentLines, text, category);
   lines.splice(startIndex, contentLines.length, ...replacement);
 
   await fs.writeFile(filePath, joinMarkdownLines(lines, newline), "utf8");
@@ -1318,8 +2849,18 @@ async function updateCapture(body) {
   return {
     ok: true,
     text,
+    category: category || "",
     monthlyFile: filePath
   };
+}
+
+function normalizeOptionalCaptureCategory(value) {
+  const category = String(value || "").trim().toLowerCase();
+  if (!category) return "";
+  if (!CAPTURE_CATEGORIES.has(category)) {
+    throw httpError(400, "Invalid capture category.");
+  }
+  return category;
 }
 
 function findMarkdownBlock(lines, blockLines) {
@@ -1330,17 +2871,26 @@ function findMarkdownBlock(lines, blockLines) {
   return -1;
 }
 
-function replaceCaptureText(contentLines, text) {
+function replaceCaptureText(contentLines, text, category = "") {
   const firstLine = contentLines[0] || "";
   if (/^\s*[-*]\s+\[[ xX]\]\s+/.test(firstLine)) {
+    if (category && category !== "todo") {
+      throw httpError(400, "Todo captures cannot be converted to another type yet.");
+    }
     return replaceTaskTextInLine(firstLine, text);
   }
 
-  const typedMatch = firstLine.match(/^(-\s+\d{1,2}:\d{2}(?:\s*[AP]M)?\s+\[type::\s*(?:log|thought|idea|reflection)\]\s+)(.+?)\s*$/i);
+  if (category === "todo") {
+    throw httpError(400, "Non-task captures cannot be converted to todo yet.");
+  }
+
+  const typedMatch = firstLine.match(/^(-\s+\d{1,2}:\d{2}(?:\s*[AP]M)?\s+\[type::\s*)(log|thought|idea|reflection)(\]\s+)(.+?)\s*$/i);
   if (typedMatch) {
     const [first, ...rest] = text.split("\n");
+    const nextCategory = category || typedMatch[2].toLowerCase();
+    const inlineFields = extractTrailingCaptureInlineFields(typedMatch[4]);
     return [
-      `${typedMatch[1]}${first}`,
+      `${typedMatch[1]}${nextCategory}${typedMatch[3]}${[first, inlineFields].filter(Boolean).join(" ")}`,
       ...rest.map((line) => `  ${line}`)
     ];
   }
@@ -1348,16 +2898,39 @@ function replaceCaptureText(contentLines, text) {
   throw httpError(400, "This capture format cannot be edited yet.");
 }
 
-function formatCaptureEntry({ date, category, text, todo = null }) {
+function extractTrailingCaptureInlineFields(text) {
+  return String(text || "")
+    .match(/(?:\s+(?:\[\[[A-Za-z0-9_-]+::\s*[^\]]+\]\]|\[[A-Za-z0-9_-]+::\s*[^\]]+\]))+\s*$/)?.[0]
+    ?.trim() || "";
+}
+
+function formatCaptureEntry({ date, category, text, todo = null, source = "" }) {
   const time = formatTime(date);
   if (category === "todo") {
-    return formatTodo(text, date, todo);
+    return formatTodo(text, date, todo, source);
   }
 
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const [first, ...rest] = lines;
+  const sourceField = formatCaptureSourceField(source);
   const continuation = rest.map((line) => `  ${line}`).join("\n");
-  return [`- ${time} [type:: ${category}] ${first}`, continuation].filter(Boolean).join("\n");
+  return [`- ${time} [type:: ${category}] ${first} ${sourceField}`.trimEnd(), continuation].filter(Boolean).join("\n");
+}
+
+function normalizeCaptureSource(value) {
+  const normalized = String(value || "").trim().replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!normalized) return "";
+  if (normalized.startsWith("opencode:")) return normalized;
+  if (!normalized.endsWith(".md")) throw httpError(400, "Capture source must be a Markdown file.");
+  if (!normalized.startsWith(`${CHAT_SESSIONS_DIR}/`)) throw httpError(400, "Capture source must be a chat session.");
+  return normalized;
+}
+
+function formatCaptureSourceField(source) {
+  if (!source) return "";
+  return source.startsWith("opencode:")
+    ? `[source:: ${source}]`
+    : `[source:: [[${source}]]]`;
 }
 
 function normalizeTodoCaptureMetadata(body) {
@@ -1383,7 +2956,7 @@ function parseBooleanInput(value) {
   return false;
 }
 
-function formatTodo(text, date, metadata = null) {
+function formatTodo(text, date, metadata = null, source = "") {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (!lines.length) return "- [ ]";
   const [first, ...rest] = lines;
@@ -1393,7 +2966,8 @@ function formatTodo(text, date, metadata = null) {
     metadata ? `[important:: ${metadata.important ? "true" : "false"}]` : "",
     metadata ? `[urgent:: ${metadata.urgent ? "true" : "false"}]` : "",
     metadata?.priority ? `[priority:: ${metadata.priority}]` : "",
-    metadata?.due ? `[due:: ${metadata.due}]` : ""
+    metadata?.due ? `[due:: ${metadata.due}]` : "",
+    formatCaptureSourceField(source)
   ].filter(Boolean).join(" ");
 
   return [
@@ -1479,6 +3053,7 @@ async function readRecentCaptures(limit = 12) {
       if (lastCapture && lastCapture.heading === `## ${currentDay}` && /^\s{2,}\S/.test(line)) {
         const continuation = line.trim();
         lastCapture.text = `${lastCapture.text}\n${continuation}`;
+        lastCapture.displayText = stripCaptureDisplayFields(lastCapture.text);
         lastCapture.content = `${lastCapture.content}\n${line}`;
       }
     }
@@ -1490,12 +3065,14 @@ async function readRecentCaptures(limit = 12) {
 
 function finalizeOldCapture(capture) {
   const content = capture.lines.join("\n").trim();
+  const text = content.replace(/^- \[ \]\s*/, "").trim();
   return {
     id: `${capture.label}-${capture.category}-${content.length}`,
     heading: capture.heading,
     label: capture.label,
     category: capture.category,
-    text: content.replace(/^- \[ \]\s*/, "").trim(),
+    text,
+    displayText: stripCaptureDisplayFields(text),
     content
   };
 }
@@ -1518,6 +3095,7 @@ function parseStructuredCaptureLine(line, day) {
         label,
         category: "todo",
         text,
+        displayText: stripCaptureDisplayFields(text),
         content: line.trim(),
         metadata: {
           important: important === "true",
@@ -1537,6 +3115,7 @@ function parseStructuredCaptureLine(line, day) {
       label: legacyTodoMatch[3],
       category: "todo",
       text: legacyTodoMatch[1].trim(),
+      displayText: stripCaptureDisplayFields(legacyTodoMatch[1].trim()),
       content: line.trim()
     };
   }
@@ -1544,17 +3123,27 @@ function parseStructuredCaptureLine(line, day) {
   const typedMatch = line.match(typedPattern);
   if (typedMatch) {
     const label = `${day} ${typedMatch[1]}`;
+    const text = typedMatch[3].trim();
     return {
-      id: `${label}-${typedMatch[2]}-${typedMatch[3].length}`,
+      id: `${label}-${typedMatch[2]}-${text.length}`,
       heading: `## ${day}`,
       label,
       category: typedMatch[2],
-      text: typedMatch[3].trim(),
+      text,
+      displayText: stripCaptureDisplayFields(text),
       content: line.trim()
     };
   }
 
   return null;
+}
+
+function stripCaptureDisplayFields(text) {
+  return String(text || "")
+    .replace(/\s*\[\[domain::\s*[^\]]*]]/gi, "")
+    .replace(/\s*\[domain::\s*[^\]]*]/gi, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 
 function readInlineFields(text) {

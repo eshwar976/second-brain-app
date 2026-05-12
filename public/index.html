@@ -96,6 +96,7 @@
             <div class="top-actions">
               <div class="capture-view-toggle" role="group" aria-label="Capture timeline view">
                 <button class="view-option is-active" type="button" data-capture-view="today">Today</button>
+                <button class="view-option" type="button" data-capture-view="week">This week</button>
                 <button class="view-option" type="button" data-capture-view="month">Month</button>
               </div>
               <div class="vault-pill" aria-live="polite">
@@ -154,21 +155,47 @@
         <section class="tab-panel" data-tab-panel="chat" aria-label="Chat" hidden>
           <header class="top-bar">
             <div>
-              <p class="eyebrow">thinking layer · planned</p>
+              <p class="eyebrow">thinking layer · vault-aware</p>
               <h1>Chat</h1>
             </div>
-            <div class="vault-pill"><span class="status-dot"></span><span>WIP</span></div>
+            <div class="chat-header-actions">
+              <button class="session-button" id="chat-session-history" type="button" aria-expanded="false">Sessions</button>
+              <div class="vault-pill"><span class="status-dot"></span><span id="chat-status">Local index</span></div>
+              <div class="session-popover" id="chat-session-popover" hidden></div>
+            </div>
           </header>
-          <section class="placeholder-view">
-            <article class="placeholder-card">
-              <p class="placeholder-kicker">Work in progress</p>
-              <h2>Vault-aware chat will live here.</h2>
-              <p>Same calm message flow, with retrieved notes and source references once indexing is ready.</p>
-            </article>
+          <section class="chat-timeline" id="chat-timeline" aria-live="polite" aria-label="Chat messages">
+            <div class="empty-state chat-empty">
+              <p class="empty-title">Ask the vault.</p>
+              <p>Use #mentor, /assistant, or @person to add focused context.</p>
+            </div>
           </section>
-          <div class="composer placeholder-composer">
-            <div class="input-row is-disabled">Ask the vault, synthesize ideas, or continue a deep work session.</div>
-          </div>
+          <form class="composer chat-composer" id="chat-form">
+            <div class="chat-composer-tools">
+              <button class="session-button" id="chat-new-session" type="button">New</button>
+              <button class="thinking-toggle" type="button" data-chat-thinking="enabled" aria-pressed="false">
+                <span>Thinking</span>
+                <span class="toggle-bubble" aria-hidden="true"></span>
+              </button>
+            </div>
+            <div class="input-row">
+              <label class="sr-only" for="chat-text">Chat message</label>
+              <textarea
+                id="chat-text"
+                rows="1"
+                placeholder="Ask the vault, or try /planner @person #note..."
+                autocomplete="off"
+                spellcheck="true"
+              ></textarea>
+              <button class="send-button" id="chat-send-button" type="submit" aria-label="Send chat message">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 19V5m0 0-6 6m6-6 6 6" />
+                </svg>
+              </button>
+            </div>
+            <div class="chat-suggestion-popover" id="chat-suggestions" hidden></div>
+            <p class="helper-line" id="chat-helper-line"></p>
+          </form>
         </section>
 
         <section class="tab-panel" data-tab-panel="tasks" aria-label="Tasks" hidden>
