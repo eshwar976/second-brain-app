@@ -21,8 +21,11 @@ const THEME_STORAGE_KEY = "secondBrain.theme";
 const APP_SECRET_STORAGE_KEY = "secondBrain.appSecret";
 const CHAT_THINKING_STORAGE_KEY = "secondBrain.chatThinkingMode";
 const CHAT_SESSION_STORAGE_KEY = "secondBrain.activeChatSession";
+const DEEP_WORK_ENABLED_STORAGE_KEY = "secondBrain.deepWork.enabled";
+const DEEP_WORK_GOAL_STORAGE_KEY = "secondBrain.deepWork.goal";
+const DEEP_WORK_SESSION_STORAGE_KEY = "secondBrain.deepWork.sessionPath";
 const CHAT_SUGGEST_DEBOUNCE_MS = 90;
-const CHAT_RESPONSE_POLL_MS = 3000;
+const CHAT_AUTO_RESUME_MS = 30 * 60 * 1000;
 const THEME_CHOICES = new Set(["system", "light", "dark"]);
 const CHAT_THINKING_CHOICES = new Set(["disabled", "enabled"]);
 const systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -41,10 +44,13 @@ const state = {
   chatMessages: [],
   chatSending: false,
   chatThinkingMode: "disabled",
+  deepWorkEnabled: false,
+  deepWorkGoal: "",
+  deepWorkSessionPath: "",
   chatSession: null,
   chatSessions: [],
   chatSessionPickerOpen: false,
-  chatResponsePollTimer: null,
+  chatSessionQuery: "",
   captureSwipe: null,
   chatSuggestions: {
     open: false,
@@ -57,6 +63,7 @@ const state = {
     activeIndex: 0,
     requestId: 0
   },
+  chatContext: [],
   dashboard: null,
   config: null,
   searchResults: [],
@@ -96,11 +103,22 @@ const chatHelperLine = document.querySelector("#chat-helper-line");
 const chatStatus = document.querySelector("#chat-status");
 const chatThinkingButtons = Array.from(document.querySelectorAll("[data-chat-thinking]"));
 const chatSuggestions = document.querySelector("#chat-suggestions");
+const chatContextPanel = document.querySelector("#chat-context-panel");
 const chatNewSessionButton = document.querySelector("#chat-new-session");
 const chatSessionHistoryButton = document.querySelector("#chat-session-history");
 const chatSessionPopover = document.querySelector("#chat-session-popover");
+const deepWorkToggle = document.querySelector("#deep-work-toggle");
+const deepWorkSheet = document.querySelector("#deep-work-sheet");
+const deepWorkGoalInput = document.querySelector("#deep-work-goal");
+const deepWorkConfirmButton = document.querySelector("#deep-work-confirm");
+const deepWorkStopButton = document.querySelector("#deep-work-stop");
+const deepWorkCancelButtons = Array.from(document.querySelectorAll("[data-deep-work-cancel]"));
+const contextSheet = document.querySelector("#context-sheet");
+const contextDetailList = document.querySelector("#context-detail-list");
+const contextCancelButtons = Array.from(document.querySelectorAll("[data-context-cancel]"));
 const tasksList = document.querySelector("#tasks-list");
 const tasksCount = document.querySelector("#tasks-count");
+const tasksNavBadge = document.querySelector("#tasks-nav-badge");
 const tasksRefreshButton = document.querySelector("#tasks-refresh-button");
 const taskStatusFilter = document.querySelector("#task-status-filter");
 const taskFocusFilter = document.querySelector("#task-focus-filter");
@@ -144,6 +162,7 @@ init();
 async function init() {
   initTheme();
   initAuth();
+  initDeepWork();
   wireInteractions();
   registerServiceWorker();
   await loadConfig();
@@ -175,6 +194,10 @@ function wireInteractions() {
     autoResize(editText);
   });
 
+  deepWorkGoalInput?.addEventListener("input", () => {
+    autoResize(deepWorkGoalInput);
+  });
+
   chatText?.addEventListener("input", () => {
     autoResize(chatText);
     updateChatSuggestions();
@@ -199,11 +222,34 @@ function wireInteractions() {
     await startNewChatSession();
   });
 
+  deepWorkToggle?.addEventListener("click", () => {
+    openDeepWorkSheet();
+  });
+
+  deepWorkConfirmButton?.addEventListener("click", async () => {
+    await saveDeepWorkGoal();
+  });
+
+  deepWorkStopButton?.addEventListener("click", async () => {
+    await stopDeepWork();
+  });
+
+  deepWorkCancelButtons.forEach((button) => {
+    button.addEventListener("click", () => closeDeepWorkSheet());
+  });
+
+  contextCancelButtons.forEach((button) => {
+    button.addEventListener("click", () => closeContextSheet());
+  });
+
+  contextSheet?.addEventListener("click", handleContextSheetClick);
+
   chatSessionHistoryButton?.addEventListener("click", async () => {
     await toggleChatSessionPicker();
   });
 
-  chatSessionPopover?.addEventListener("mousedown", handleChatSessionPickerPointer);
+  chatSessionPopover?.addEventListener("click", handleChatSessionPickerClick);
+  chatSessionPopover?.addEventListener("input", handleChatSessionPickerInput);
 
   textarea.addEventListener("keydown", (event) => {
     if (shouldSubmitCaptureFromKeyboard(event)) {
@@ -306,12 +352,20 @@ function wireInteractions() {
   });
 
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.chatSessionPickerOpen) {
+      closeChatSessionPicker();
+      return;
+    }
     if (event.key === "Escape" && editSheet && !editSheet.hidden) {
       closeEditSheet();
       return;
     }
     if (event.key === "Escape" && authSheet && !authSheet.hidden) {
       closeAuthSheet();
+      return;
+    }
+    if (event.key === "Escape" && contextSheet && !contextSheet.hidden) {
+      closeContextSheet();
       return;
     }
     if (event.key === "Escape" && todoSheet && !todoSheet.hidden) {
@@ -338,6 +392,7 @@ function wireInteractions() {
   tasksList?.addEventListener("click", handleTaskActionClick);
   chatTimeline?.addEventListener("click", handleChatSourceClick);
   chatSuggestions?.addEventListener("mousedown", handleChatSuggestionPointer);
+  chatContextPanel?.addEventListener("click", handleChatContextPanelClick);
   tasksList?.addEventListener("dblclick", handleTaskEditDoubleClick);
   timeline?.addEventListener("change", handleCaptureCategoryChange);
   timeline?.addEventListener("pointerdown", handleCapturePointerDown);
@@ -400,6 +455,19 @@ function initAuth() {
   } catch {
     state.authSecret = "";
   }
+}
+
+function initDeepWork() {
+  try {
+    state.deepWorkGoal = window.localStorage.getItem(DEEP_WORK_GOAL_STORAGE_KEY) || "";
+    state.deepWorkSessionPath = window.localStorage.getItem(DEEP_WORK_SESSION_STORAGE_KEY) || "";
+    state.deepWorkEnabled = window.localStorage.getItem(DEEP_WORK_ENABLED_STORAGE_KEY) === "true" && Boolean(state.deepWorkGoal.trim());
+  } catch {
+    state.deepWorkGoal = "";
+    state.deepWorkSessionPath = "";
+    state.deepWorkEnabled = false;
+  }
+  renderDeepWorkState();
 }
 
 function saveAuthSecret() {
@@ -559,14 +627,14 @@ async function loadConfig() {
     state.chatThinkingMode = CHAT_THINKING_CHOICES.has(storedThinkingMode)
       ? storedThinkingMode
       : (config.chat?.defaultThinking || "disabled");
-    vaultName.textContent = config.vaultName;
-    currentMonth.textContent = config.currentMonth;
+    if (vaultName) vaultName.textContent = config.vaultName;
+    if (currentMonth) currentMonth.textContent = config.currentMonth;
     if (chatStatus) chatStatus.textContent = config.chat?.enabled ? getActiveChatModel() : "API key needed";
-    helperLine.textContent = "";
+    if (helperLine) helperLine.textContent = "";
     renderChatThinkingState();
     renderSettingsDetails(config);
   } catch (error) {
-    helperLine.textContent = error.message;
+    if (helperLine) helperLine.textContent = error.message;
   }
 }
 
@@ -579,6 +647,109 @@ function renderChatThinkingState() {
   if (chatStatus && state.config?.chat?.enabled) {
     chatStatus.textContent = getActiveChatModel();
   }
+}
+
+function renderDeepWorkState() {
+  if (deepWorkToggle) {
+    deepWorkToggle.classList.toggle("is-active", state.deepWorkEnabled);
+    deepWorkToggle.setAttribute("aria-pressed", String(state.deepWorkEnabled));
+    const goal = String(state.deepWorkGoal || "").trim();
+    deepWorkToggle.title = state.deepWorkEnabled && goal ? `Deep Work active: ${goal}` : "Start Deep Work";
+    deepWorkToggle.innerHTML = state.deepWorkEnabled
+      ? `<span class="deep-work-dot" aria-hidden="true"></span><span>Focus</span><strong>${escapeHtml(clipUiText(goal, 26))}</strong>`
+      : `<span class="deep-work-dot" aria-hidden="true"></span><span>Deep Work</span><strong>Off</strong>`;
+  }
+  renderChat();
+}
+
+function getDeepWorkPayload() {
+  const goal = String(state.deepWorkGoal || "").trim();
+  return {
+    enabled: Boolean(state.deepWorkEnabled && goal),
+    goal,
+    sessionPath: state.deepWorkSessionPath || ""
+  };
+}
+
+function openDeepWorkSheet() {
+  if (!deepWorkSheet) return;
+  if (deepWorkGoalInput) {
+    deepWorkGoalInput.value = state.deepWorkGoal || "";
+    autoResize(deepWorkGoalInput);
+  }
+  if (deepWorkStopButton) deepWorkStopButton.hidden = !state.deepWorkEnabled;
+  if (deepWorkConfirmButton) deepWorkConfirmButton.textContent = state.deepWorkEnabled ? "Update" : "Start";
+  deepWorkSheet.hidden = false;
+  document.body.classList.add("sheet-open");
+  requestAnimationFrame(() => deepWorkGoalInput?.focus());
+}
+
+function closeDeepWorkSheet() {
+  if (!deepWorkSheet) return;
+  deepWorkSheet.hidden = true;
+  document.body.classList.remove("sheet-open");
+  chatText?.focus();
+}
+
+async function saveDeepWorkGoal() {
+  const goal = String(deepWorkGoalInput?.value || "").trim();
+  if (!goal) {
+    flashChatHelper("Add a Deep Work goal first.");
+    deepWorkGoalInput?.focus();
+    return;
+  }
+  if (deepWorkConfirmButton) deepWorkConfirmButton.disabled = true;
+  try {
+    const data = await postJson("/api/deep-work/start", {
+      goal,
+      sessionPath: state.deepWorkSessionPath || ""
+    });
+    state.deepWorkSessionPath = data.path || state.deepWorkSessionPath || "";
+  } catch (error) {
+    flashChatHelper(error.message);
+    deepWorkGoalInput?.focus();
+    if (deepWorkConfirmButton) deepWorkConfirmButton.disabled = false;
+    return;
+  }
+  state.deepWorkGoal = goal;
+  state.deepWorkEnabled = true;
+  try {
+    window.localStorage.setItem(DEEP_WORK_GOAL_STORAGE_KEY, goal);
+    window.localStorage.setItem(DEEP_WORK_ENABLED_STORAGE_KEY, "true");
+    if (state.deepWorkSessionPath) window.localStorage.setItem(DEEP_WORK_SESSION_STORAGE_KEY, state.deepWorkSessionPath);
+  } catch {
+    // In-memory mode still works.
+  }
+  if (deepWorkConfirmButton) deepWorkConfirmButton.disabled = false;
+  closeDeepWorkSheet();
+  renderDeepWorkState();
+  flashChatHelper("Deep Work mode active.");
+}
+
+async function stopDeepWork() {
+  const sessionPath = state.deepWorkSessionPath || "";
+  if (deepWorkStopButton) deepWorkStopButton.disabled = true;
+  if (sessionPath) {
+    try {
+      await postJson("/api/deep-work/stop", { sessionPath });
+    } catch (error) {
+      flashChatHelper(error.message);
+      if (deepWorkStopButton) deepWorkStopButton.disabled = false;
+      return;
+    }
+  }
+  state.deepWorkEnabled = false;
+  state.deepWorkSessionPath = "";
+  try {
+    window.localStorage.setItem(DEEP_WORK_ENABLED_STORAGE_KEY, "false");
+    window.localStorage.removeItem(DEEP_WORK_SESSION_STORAGE_KEY);
+  } catch {
+    // In-memory mode still works.
+  }
+  if (deepWorkStopButton) deepWorkStopButton.disabled = false;
+  closeDeepWorkSheet();
+  renderDeepWorkState();
+  flashChatHelper("Deep Work mode off.");
 }
 
 function getThinkingLabel() {
@@ -618,13 +789,23 @@ async function loadStoredChatSession() {
   try {
     const params = new URLSearchParams({ path: stored });
     const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
-    state.chatSession = data.session || null;
+    const session = data.session || null;
+    if (!isAutoResumableChatSession(session)) {
+      forgetStoredChatSession();
+      state.chatSession = null;
+      state.chatMessages = [];
+      renderChat();
+      renderChatSessionState();
+      return;
+    }
+    state.chatSession = session;
+    upsertChatSession(state.chatSession);
     state.chatMessages = (data.messages || []).filter((message) => message.content);
     renderChat();
     renderChatSessionState();
     flashChatHelper(state.chatSession?.title ? `Loaded ${state.chatSession.title}.` : "Loaded session.");
   } catch (error) {
-    window.localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
+    forgetStoredChatSession();
     state.chatSession = null;
     state.chatMessages = [];
     renderChatSessionState();
@@ -632,15 +813,25 @@ async function loadStoredChatSession() {
   }
 }
 
+function isAutoResumableChatSession(session) {
+  const createdAt = new Date(session?.created || "");
+  if (Number.isNaN(createdAt.getTime())) return false;
+  return Date.now() - createdAt.getTime() <= CHAT_AUTO_RESUME_MS;
+}
+
+function forgetStoredChatSession() {
+  try {
+    window.localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
+  } catch {
+    // The in-memory chat state still resets cleanly.
+  }
+}
+
 async function startNewChatSession() {
   closeChatSessionPicker();
   state.chatSession = null;
   state.chatMessages = [];
-  try {
-    window.localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
-  } catch {
-    // Ignore storage failures; the in-memory session is still reset.
-  }
+  forgetStoredChatSession();
   renderChat();
   renderChatSessionState();
   flashChatHelper("New session ready.");
@@ -657,6 +848,7 @@ async function toggleChatSessionPicker() {
   try {
     const data = await protectedGetJson("/api/chat/sessions?limit=30");
     state.chatSessions = data.sessions || [];
+    upsertChatSession(state.chatSession);
     renderChatSessionPicker();
   } catch (error) {
     renderChatSessionPicker({ error: error.message });
@@ -665,6 +857,7 @@ async function toggleChatSessionPicker() {
 
 function closeChatSessionPicker() {
   state.chatSessionPickerOpen = false;
+  state.chatSessionQuery = "";
   if (chatSessionPopover) {
     chatSessionPopover.hidden = true;
     chatSessionPopover.innerHTML = "";
@@ -676,38 +869,180 @@ function renderChatSessionPicker({ loading = false, error = "" } = {}) {
   if (!chatSessionPopover) return;
   chatSessionPopover.hidden = false;
   chatSessionHistoryButton?.setAttribute("aria-expanded", "true");
-  const sessions = state.chatSessions || [];
   chatSessionPopover.innerHTML = `
-    <div class="session-popover-head">
-      <strong>Chat sessions</strong>
-      <span>${escapeHtml(state.config?.chat?.sessionsDir || "")}</span>
-    </div>
+    <button class="session-backdrop" type="button" data-session-close aria-label="Close chat sessions"></button>
+    <aside class="session-drawer" role="dialog" aria-modal="true" aria-label="Chat sessions">
+      <div class="session-drawer-top">
+        <button class="session-icon-button" type="button" data-session-close aria-label="Close chat sessions">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15 18l-6-6 6-6" />
+          </svg>
+        </button>
+        <span class="session-drawer-spacer"></span>
+      </div>
+
+      <button class="session-drawer-action" type="button" data-session-new>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 5h7m-7 14h7M5 12h14M5 5h2m-2 14h2" />
+        </svg>
+        <span>New chat</span>
+      </button>
+
+      <label class="session-search">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="6" />
+          <path d="m16 16 4 4" />
+        </svg>
+        <input data-session-search type="search" placeholder="Search" value="${escapeHtml(state.chatSessionQuery)}" autocomplete="off" />
+      </label>
+
+      <div class="session-drawer-section" data-session-results>
+        ${renderChatSessionListMarkup({ loading, error })}
+      </div>
+    </aside>
+  `;
+}
+
+function getFilteredChatSessions() {
+  const allSessions = state.chatSessions || [];
+  const query = state.chatSessionQuery.trim().toLowerCase();
+  if (!query) return allSessions;
+  return allSessions.filter((session) => {
+    const haystack = [
+      session.title,
+      session.path,
+      formatSessionUpdated(session.updated || session.created)
+    ].join(" ").toLowerCase();
+    return haystack.includes(query);
+  });
+}
+
+function renderChatSessionListMarkup({ loading = false, error = "" } = {}) {
+  const query = state.chatSessionQuery.trim();
+  const sessions = getFilteredChatSessions();
+  return `
+    <div class="session-section-title">Chats</div>
     ${loading ? `<p class="session-empty">Loading sessions...</p>` : ""}
     ${error ? `<p class="session-empty">${escapeHtml(error)}</p>` : ""}
-    ${!loading && !error && sessions.length ? `
-      <div class="session-list">
-        ${sessions.map(renderChatSessionOption).join("")}
-      </div>
-    ` : ""}
-    ${!loading && !error && !sessions.length ? `<p class="session-empty">No saved sessions yet.</p>` : ""}
+    ${!loading && !error && sessions.length ? renderChatSessionGroups(sessions) : ""}
+    ${!loading && !error && !sessions.length ? `<p class="session-empty">${query ? "No matching chats." : "No saved sessions yet."}</p>` : ""}
   `;
+}
+
+function renderChatSessionGroups(sessions) {
+  const groups = groupChatSessions(sessions);
+  return groups.map((group) => `
+    <div class="session-group">
+      <div class="session-group-title">${escapeHtml(group.label)}</div>
+      <div class="session-list">
+        ${group.sessions.map(renderChatSessionOption).join("")}
+      </div>
+    </div>
+  `).join("");
+}
+
+function groupChatSessions(sessions) {
+  const today = [];
+  const thisWeek = [];
+  const older = [];
+  const startToday = new Date();
+  startToday.setHours(0, 0, 0, 0);
+  const weekAgo = new Date(startToday);
+  weekAgo.setDate(weekAgo.getDate() - 6);
+
+  for (const session of sessions) {
+    const date = new Date(session.updated || session.created || "");
+    if (!Number.isNaN(date.getTime()) && date >= startToday) {
+      today.push(session);
+    } else if (!Number.isNaN(date.getTime()) && date >= weekAgo) {
+      thisWeek.push(session);
+    } else {
+      older.push(session);
+    }
+  }
+
+  return [
+    { label: "Today", sessions: today },
+    { label: "This week", sessions: thisWeek },
+    { label: "Older", sessions: older }
+  ].filter((group) => group.sessions.length);
+}
+
+function renderChatSessionResults() {
+  const results = chatSessionPopover?.querySelector("[data-session-results]");
+  if (!results) return;
+  results.innerHTML = renderChatSessionListMarkup();
 }
 
 function renderChatSessionOption(session) {
   const active = state.chatSession?.path === session.path;
   return `
-    <button class="session-option ${active ? "is-active" : ""}" type="button" data-session-path="${escapeHtml(session.path)}">
-      <strong>${escapeHtml(session.title || "Untitled session")}</strong>
-      <small>${escapeHtml(formatSessionUpdated(session.updated || session.created))}</small>
-    </button>
+    <div class="session-option ${active ? "is-active" : ""}">
+      <button class="session-open" type="button" data-session-path="${escapeHtml(session.path)}">
+        <strong>${escapeHtml(session.title || "Untitled session")}</strong>
+        <small>${escapeHtml(formatSessionUpdated(session.updated || session.created))}</small>
+      </button>
+      <div class="session-row-actions" aria-label="Session actions">
+        <button type="button" data-session-rename="${escapeHtml(session.path)}" aria-label="Rename ${escapeHtml(session.title || "session")}">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m4 20 4.4-1 10-10a2.2 2.2 0 0 0-3.1-3.1l-10 10L4 20Z" />
+            <path d="m13.5 7.5 3 3" />
+          </svg>
+        </button>
+        <button type="button" data-session-delete="${escapeHtml(session.path)}" aria-label="Delete ${escapeHtml(session.title || "session")}">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16" />
+            <path d="M10 11v6M14 11v6" />
+            <path d="M6 7l1 13h10l1-13" />
+            <path d="M9 7V4h6v3" />
+          </svg>
+        </button>
+      </div>
+    </div>
   `;
 }
 
-async function handleChatSessionPickerPointer(event) {
+async function handleChatSessionPickerClick(event) {
+  const closeButton = event.target.closest("[data-session-close]");
+  if (closeButton) {
+    event.preventDefault();
+    closeChatSessionPicker();
+    return;
+  }
+
+  const newButton = event.target.closest("[data-session-new]");
+  if (newButton) {
+    event.preventDefault();
+    closeChatSessionPicker();
+    startNewChatSession();
+    return;
+  }
+
+  const renameButton = event.target.closest("[data-session-rename]");
+  if (renameButton) {
+    event.preventDefault();
+    await renameChatSession(renameButton.dataset.sessionRename || "");
+    return;
+  }
+
+  const deleteButton = event.target.closest("[data-session-delete]");
+  if (deleteButton) {
+    event.preventDefault();
+    await deleteChatSession(deleteButton.dataset.sessionDelete || "");
+    return;
+  }
+
   const button = event.target.closest("[data-session-path]");
   if (!button) return;
   event.preventDefault();
   await openChatSession(button.dataset.sessionPath || "");
+}
+
+function handleChatSessionPickerInput(event) {
+  const input = event.target.closest("[data-session-search]");
+  if (!input) return;
+  state.chatSessionQuery = input.value || "";
+  renderChatSessionResults();
 }
 
 async function openChatSession(sessionPath) {
@@ -716,6 +1051,7 @@ async function openChatSession(sessionPath) {
     const params = new URLSearchParams({ path: sessionPath });
     const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
     state.chatSession = data.session || null;
+    upsertChatSession(state.chatSession);
     state.chatMessages = (data.messages || []).filter((message) => message.content);
     if (state.chatSession?.path) {
       window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, state.chatSession.path);
@@ -730,9 +1066,67 @@ async function openChatSession(sessionPath) {
   }
 }
 
+async function renameChatSession(sessionPath) {
+  const session = state.chatSessions.find((item) => item.path === sessionPath);
+  const currentTitle = session?.title || state.chatSession?.title || "";
+  const title = window.prompt("Rename chat", currentTitle);
+  if (title === null) return;
+  const nextTitle = title.trim();
+  if (!nextTitle) {
+    flashChatHelper("Session title cannot be empty.");
+    return;
+  }
+  try {
+    const data = await postJson("/api/chat/session/update", {
+      path: sessionPath,
+      title: nextTitle
+    });
+    const updated = data.session || { ...session, title: nextTitle };
+    upsertChatSession(updated);
+    if (state.chatSession?.path === sessionPath) state.chatSession = { ...state.chatSession, ...updated };
+    renderChatSessionResults();
+    renderChatSessionState();
+    flashChatHelper("Session renamed.");
+  } catch (error) {
+    flashChatHelper(error.message);
+  }
+}
+
+function upsertChatSession(session) {
+  if (!session?.path) return;
+  const index = state.chatSessions.findIndex((item) => item.path === session.path);
+  if (index >= 0) {
+    state.chatSessions[index] = { ...state.chatSessions[index], ...session };
+  } else {
+    state.chatSessions.unshift(session);
+  }
+}
+
+async function deleteChatSession(sessionPath) {
+  const session = state.chatSessions.find((item) => item.path === sessionPath);
+  const title = session?.title || "this chat";
+  if (!window.confirm(`Delete "${title}"? This removes the OpenCode session.`)) return;
+  try {
+    await postJson("/api/chat/session/delete", { path: sessionPath });
+    state.chatSessions = state.chatSessions.filter((item) => item.path !== sessionPath);
+    if (state.chatSession?.path === sessionPath) {
+      state.chatSession = null;
+      state.chatMessages = [];
+      forgetStoredChatSession();
+      renderChat();
+      renderChatSessionState();
+    }
+    renderChatSessionResults();
+    flashChatHelper("Session deleted.");
+  } catch (error) {
+    flashChatHelper(error.message);
+  }
+}
+
 function renderChatSessionState() {
   if (!chatSessionHistoryButton) return;
-  chatSessionHistoryButton.textContent = state.chatSession?.title ? clipUiText(state.chatSession.title, 18) : "Sessions";
+  const label = state.chatSession?.title ? `Open chat sessions. Current session: ${state.chatSession.title}` : "Open chat sessions";
+  chatSessionHistoryButton.setAttribute("aria-label", label);
   chatSessionHistoryButton.title = state.chatSession?.path || "Sessions";
 }
 
@@ -931,16 +1325,176 @@ function handleChatSuggestionPointer(event) {
 
 function insertChatSuggestion(item) {
   if (!chatText || !item) return;
-  const token = `${state.chatSuggestions.trigger}${item.token || item.name || item.title}`;
-  const before = chatText.value.slice(0, state.chatSuggestions.start);
-  const after = chatText.value.slice(state.chatSuggestions.end);
-  const suffix = after.startsWith(" ") ? "" : " ";
-  chatText.value = `${before}${token}${suffix}${after}`;
-  const caret = before.length + token.length + suffix.length;
+  addChatContextItem(item, state.chatSuggestions.kind, state.chatSuggestions.trigger);
+  const before = chatText.value.slice(0, state.chatSuggestions.start).replace(/[ \t]$/, "");
+  const after = chatText.value.slice(state.chatSuggestions.end).replace(/^[ \t]+/, "");
+  const separator = before && after && !after.startsWith("\n") ? " " : "";
+  chatText.value = `${before}${separator}${after}`;
+  const caret = before.length + separator.length;
   chatText.setSelectionRange(caret, caret);
   autoResize(chatText);
   closeChatSuggestions();
+  renderChatContextPanel();
   chatText.focus();
+}
+
+function addChatContextItem(item, kind, trigger) {
+  const normalized = normalizeChatContextItem(item, kind, trigger);
+  if (!normalized) return;
+  const exists = state.chatContext.some((context) => getChatContextKey(context) === getChatContextKey(normalized));
+  if (!exists) state.chatContext.push(normalized);
+}
+
+function normalizeChatContextItem(item, kind, trigger) {
+  const normalizedKind = item.kind || kind || getReferenceKindForTrigger(trigger);
+  if (!normalizedKind) return null;
+  const title = item.title || item.name || item.token || item.path || "Context";
+  const name = item.name || item.title || item.token || title;
+  const token = item.token || slugifyUiToken(name || title || item.path);
+  return {
+    id: item.id || item.note_id || item.path || `${normalizedKind}:${token}`,
+    kind: normalizedKind,
+    title,
+    name,
+    token,
+    path: item.path || "",
+    type: item.type || null
+  };
+}
+
+function getChatContextKey(item) {
+  return `${item.kind}:${item.path || item.token || item.name || item.title}`.toLowerCase();
+}
+
+function slugifyUiToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function renderChatContextPanel() {
+  if (!chatContextPanel) return;
+  const items = state.chatContext || [];
+  chatContextPanel.hidden = !items.length;
+  chatContextPanel.innerHTML = items.length ? `
+    <button class="chat-context-label" type="button" data-context-details>Context</button>
+    <div class="chat-context-chips">
+      ${items.map((item) => renderChatContextChip(item, { removable: true })).join("")}
+    </div>
+  ` : "";
+}
+
+function renderChatContextChip(item, { removable = false } = {}) {
+  const label = getChatContextPrefix(item.kind);
+  const title = item.title || item.name || item.token || item.path || "Context";
+  const openNoteAttr = !removable && item.path ? ` data-open-note="${escapeHtml(item.path)}"` : "";
+  return `
+    <span class="chat-context-chip" title="${escapeHtml(item.path || title)}"${openNoteAttr}>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(title)}</strong>
+      ${removable ? `<button type="button" data-context-remove="${escapeHtml(getChatContextKey(item))}" aria-label="Remove ${escapeHtml(title)}">×</button>` : ""}
+    </span>
+  `;
+}
+
+function getChatContextPrefix(kind) {
+  if (kind === "skill") return "/";
+  if (kind === "people") return "@";
+  if (kind === "file") return "#";
+  if (kind === "mentor") return "#";
+  if (kind === "assistant") return "/";
+  return "+";
+}
+
+function handleChatContextPanelClick(event) {
+  const button = event.target.closest("[data-context-remove]");
+  if (button) {
+    const key = button.dataset.contextRemove;
+    state.chatContext = state.chatContext.filter((item) => getChatContextKey(item) !== key);
+    renderChatContextPanel();
+    if (contextSheet && !contextSheet.hidden) renderContextSheet();
+    return;
+  }
+  const detailsButton = event.target.closest("[data-context-details]");
+  const chip = event.target.closest(".chat-context-chip");
+  if (detailsButton || chip) {
+    event.preventDefault();
+    openContextSheet();
+  }
+}
+
+function openContextSheet() {
+  if (!contextSheet) return;
+  renderContextSheet();
+  contextSheet.hidden = false;
+  document.body.classList.add("sheet-open");
+}
+
+function closeContextSheet() {
+  if (!contextSheet) return;
+  contextSheet.hidden = true;
+  document.body.classList.remove("sheet-open");
+  chatText?.focus();
+}
+
+function renderContextSheet() {
+  if (!contextDetailList) return;
+  const items = state.chatContext || [];
+  contextDetailList.innerHTML = items.length ? items.map(renderContextDetailItem).join("") : `
+    <p class="quiet-line">No selected context yet. Use /skill, @person, or #file in the chat box.</p>
+  `;
+}
+
+function renderContextDetailItem(item) {
+  const title = item.title || item.name || item.path || "Context";
+  const kind = getReferenceKindSingular(item.kind);
+  const key = getChatContextKey(item);
+  return `
+    <article class="context-detail-card">
+      <div>
+        <span>${escapeHtml(getChatContextPrefix(item.kind))} ${escapeHtml(kind)}</span>
+        <strong>${escapeHtml(title)}</strong>
+        ${item.path ? `<small>${escapeHtml(item.path)}</small>` : `<small>OpenCode skill</small>`}
+      </div>
+      <div class="context-detail-actions">
+        ${item.path ? `<button type="button" data-open-note="${escapeHtml(item.path)}">Open</button>` : ""}
+        <button type="button" data-context-remove="${escapeHtml(key)}">Remove</button>
+      </div>
+    </article>
+  `;
+}
+
+function handleContextSheetClick(event) {
+  const removeButton = event.target.closest("[data-context-remove]");
+  if (removeButton) {
+    state.chatContext = state.chatContext.filter((item) => getChatContextKey(item) !== removeButton.dataset.contextRemove);
+    renderChatContextPanel();
+    renderContextSheet();
+    return;
+  }
+
+  const openButton = event.target.closest("[data-open-note]");
+  if (openButton) {
+    const notePath = openButton.dataset.openNote || "";
+    if (notePath) window.location.href = getObsidianNoteUrl(notePath);
+  }
+}
+
+function getSelectedChatContext() {
+  return (state.chatContext || []).map((item) => ({ ...item }));
+}
+
+function buildChatContextPayload(items) {
+  const skill = items.find((item) => item.kind === "skill" || item.kind === "assistant" || item.kind === "mentor") || null;
+  const people = items.filter((item) => item.kind === "people");
+  const files = items.filter((item) => item.kind === "file");
+  return {
+    skill,
+    people,
+    files
+  };
 }
 
 function closeChatSuggestions() {
@@ -987,6 +1541,12 @@ function renderSettingsDetails(config) {
       `).join("")}
     </div>
   ` : "";
+  const runtime = config.chat?.runtime || {};
+  const runtimeLabel = runtime.reachable ? "online" : (runtime.status || "unknown");
+  const runtimeDetail = [
+    runtime.detail,
+    runtime.latencyMs ? `${runtime.latencyMs}ms` : ""
+  ].filter(Boolean).join(" · ");
   settingsDetails.innerHTML = `
     <div class="settings-grid">
       <div><span>Vault</span><strong>${escapeHtml(config.vaultName)}</strong></div>
@@ -996,6 +1556,10 @@ function renderSettingsDetails(config) {
       <div><span>LAN URL</span><strong>${escapeHtml(config.lanUrl || "disabled")}</strong></div>
       <div><span>Write auth</span><strong>${config.authRequired ? "enabled" : "not set"}</strong></div>
       <div><span>Ignored paths</span><strong>${numberFormat(ignoreCount)}</strong></div>
+      <div class="${runtime.reachable ? "is-ok" : "is-warning"}"><span>${escapeHtml((config.chat?.provider || "chat").toUpperCase())}</span><strong>${escapeHtml(runtimeLabel)}</strong></div>
+      <div><span>OpenCode URL</span><strong>${escapeHtml(config.chat?.opencodeBaseUrl || "not used")}</strong></div>
+      <div><span>OpenCode agent</span><strong>${escapeHtml(config.chat?.agent || "not used")}</strong></div>
+      <div><span>Runtime detail</span><strong>${escapeHtml(runtimeDetail || "not checked")}</strong></div>
     </div>
     ${backupWarning ? `<p class="warning-line">Backup reminder: ${escapeHtml(backupWarning[0])} has ${escapeHtml(backupWarning[1].summary)}.</p>` : ""}
     ${backupGrid}
@@ -1005,9 +1569,14 @@ function renderSettingsDetails(config) {
         <button class="secondary-button" type="button" data-auth-open>Set/reset app passcode</button>
         <button class="secondary-button" type="button" data-auth-clear>Clear saved passcode</button>
       ` : ""}
+      <button class="secondary-button" type="button" data-chat-status-refresh>Refresh OpenCode status</button>
     </div>
   `;
   settingsDetails.querySelector("[data-auth-open]")?.addEventListener("click", openAuthSheet);
+  settingsDetails.querySelector("[data-chat-status-refresh]")?.addEventListener("click", async () => {
+    await loadConfig();
+    flashHelper("OpenCode status refreshed.");
+  });
   settingsDetails.querySelector("[data-auth-clear]")?.addEventListener("click", () => {
     state.authSecret = "";
     try {
@@ -1036,6 +1605,7 @@ async function loadIndexStatus() {
   try {
     state.indexStatus = await getJson("/api/index/status");
     renderIndexStatus();
+    renderTasksBadge();
   } catch (error) {
     renderIndexError(error.message);
   }
@@ -1068,6 +1638,7 @@ async function loadDashboard() {
     state.dashboard = await getJson("/api/dashboard");
     state.indexStatus = state.dashboard.index;
     renderIndexStatus();
+    renderTasksBadge(state.dashboard.taskSummary?.openCount);
     renderDashboard();
   } catch (error) {
     renderDashboardError(error.message);
@@ -1120,13 +1691,15 @@ async function submitChat() {
   const message = chatText?.value.trim() || "";
   if (!message || state.chatSending) return;
   const activeSessionPath = getActiveChatSessionPath();
-  const baselineAssistantCount = state.chatMessages.filter((item) => item.role === "assistant" && !item.isError && !item.isPending).length;
+  const selectedContext = getSelectedChatContext();
+  const contextPayload = buildChatContextPayload(selectedContext);
 
   const userMessage = {
     id: `user-${Date.now()}`,
     role: "user",
     content: message,
-    sources: []
+    sources: [],
+    context: selectedContext
   };
   state.chatMessages.push(userMessage);
   state.chatSending = true;
@@ -1135,6 +1708,8 @@ async function submitChat() {
     chatText.value = "";
     autoResize(chatText);
   }
+  state.chatContext = [];
+  renderChatContextPanel();
   flashChatHelper("Thinking...");
   renderChat();
   const payloadHistory = state.chatMessages
@@ -1143,11 +1718,11 @@ async function submitChat() {
     .slice(-8)
     .map((item) => ({ role: item.role, content: item.content }));
 
-  let stopResponsePolling = () => {};
   let assistantMessage = null;
   try {
     const session = await ensureChatSessionForSubmit(message, activeSessionPath);
     state.chatSession = session || state.chatSession;
+    upsertChatSession(state.chatSession);
     if (state.chatSession?.path) {
       window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, state.chatSession.path);
     }
@@ -1156,7 +1731,7 @@ async function submitChat() {
     assistantMessage = {
       id: `assistant-${Date.now()}`,
       role: "assistant",
-      content: "Waiting for OpenCode...",
+      content: "",
       sources: [],
       mentor: null,
       assistant: null,
@@ -1166,18 +1741,19 @@ async function submitChat() {
     };
     state.chatMessages.push(assistantMessage);
     renderChat();
-    if (state.chatSession?.path) {
-      stopResponsePolling = startChatResponsePolling(state.chatSession.path, assistantMessage.id, baselineAssistantCount);
-    }
 
     const data = await postJson("/api/chat", {
       message,
       history: payloadHistory,
       thinkingMode: state.chatThinkingMode,
-      sessionPath: state.chatSession?.path || activeSessionPath
+      sessionPath: state.chatSession?.path || activeSessionPath,
+      deepWork: getDeepWorkPayload(),
+      skill: contextPayload.skill,
+      people: contextPayload.people,
+      files: contextPayload.files
     });
-    stopResponsePolling();
     state.chatSession = data.session || state.chatSession;
+    upsertChatSession(state.chatSession);
     if (state.chatSession?.path) {
       window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, state.chatSession.path);
     }
@@ -1197,7 +1773,6 @@ async function submitChat() {
       ? `Saved session · used ${data.sources.length} source${data.sources.length === 1 ? "" : "s"}.`
       : "Saved session.");
   } catch (error) {
-    stopResponsePolling();
     if (assistantMessage) {
       updateChatMessage(assistantMessage.id, {
         content: error.message,
@@ -1216,7 +1791,6 @@ async function submitChat() {
     }
     flashChatHelper(error.message);
   } finally {
-    stopResponsePolling();
     state.chatSending = false;
     if (chatSendButton) chatSendButton.disabled = false;
     renderChat();
@@ -1231,56 +1805,15 @@ async function ensureChatSessionForSubmit(message, activeSessionPath) {
     const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
     return data.session || null;
   }
-  const data = await postJson("/api/chat/session", {
-    title: deriveClientChatTitle(message)
-  });
+  const payload = state.config?.chat?.provider === "opencode"
+    ? {}
+    : { title: deriveClientChatTitle(message) };
+  const data = await postJson("/api/chat/session", payload);
   return data || null;
 }
 
 function deriveClientChatTitle(message) {
   return clipUiText(String(message || "").replace(/\s+/g, " ").trim(), 48) || "New chat";
-}
-
-function startChatResponsePolling(sessionPath, assistantMessageId, baselineAssistantCount) {
-  stopChatResponsePolling();
-  let stopped = false;
-
-  const poll = async () => {
-    if (stopped || !sessionPath) return;
-    try {
-      const params = new URLSearchParams({ path: sessionPath });
-      const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
-      const assistantMessages = (data.messages || []).filter((item) => item.role === "assistant" && item.content);
-      if (assistantMessages.length <= baselineAssistantCount) return;
-      const partial = assistantMessages[baselineAssistantCount] || assistantMessages.at(-1);
-      if (!partial?.content) return;
-      const changed = updateChatMessage(assistantMessageId, {
-        content: partial.content,
-        sources: partial.sources || [],
-        mentor: partial.mentor || null,
-        assistant: partial.assistant || null,
-        people: partial.people || [],
-        isPending: true
-      });
-      if (changed) flashChatHelper("Receiving...");
-    } catch {
-      // The final /api/chat response still owns error handling.
-    }
-  };
-
-  state.chatResponsePollTimer = window.setInterval(poll, CHAT_RESPONSE_POLL_MS);
-  window.setTimeout(poll, CHAT_RESPONSE_POLL_MS);
-
-  return () => {
-    stopped = true;
-    stopChatResponsePolling();
-  };
-}
-
-function stopChatResponsePolling() {
-  if (!state.chatResponsePollTimer) return;
-  window.clearInterval(state.chatResponsePollTimer);
-  state.chatResponsePollTimer = null;
 }
 
 function updateChatMessage(messageId, patch) {
@@ -1298,6 +1831,12 @@ function updateChatMessage(messageId, patch) {
 }
 
 function handleChatSourceClick(event) {
+  const deepWorkButton = event.target.closest("[data-deep-work-edit]");
+  if (deepWorkButton) {
+    event.preventDefault();
+    openDeepWorkSheet();
+    return;
+  }
   const button = event.target.closest("[data-open-note]");
   if (!button) return;
   event.preventDefault();
@@ -1366,7 +1905,7 @@ async function submitCapture(text, metadata = {}) {
   state.captureSaving = true;
   sendButton.disabled = true;
   if (todoConfirmButton) todoConfirmButton.disabled = true;
-  helperLine.textContent = "Saving...";
+  if (helperLine) helperLine.textContent = "Saving...";
 
   try {
     const result = await postJson("/api/captures", {
@@ -1674,30 +2213,65 @@ function getObsidianNoteUrl(notePath) {
 
 function renderChat() {
   if (!chatTimeline) return;
+  const focusCard = renderDeepWorkFocusCard();
   if (!state.chatMessages.length) {
     chatTimeline.innerHTML = `
+      ${focusCard}
       <div class="empty-state chat-empty">
-        <p class="empty-title">Ask the vault.</p>
-        <p>Use #mentor, /assistant, or @person to add focused context.</p>
+        <p class="empty-title">${state.deepWorkEnabled ? "Deep Work is ready." : "Ask the vault."}</p>
+        <p>Use /skill, @person, or #file to add focused context.</p>
       </div>
     `;
     return;
   }
 
-  chatTimeline.innerHTML = state.chatMessages.map((message) => `
-    <article class="chat-message chat-${escapeHtml(message.role)} ${message.isError ? "is-error" : ""}">
+  chatTimeline.innerHTML = `${focusCard}${state.chatMessages.map((message) => `
+    <article class="chat-message chat-${escapeHtml(message.role)} ${message.isError ? "is-error" : ""} ${message.isPending ? "is-pending" : ""}">
       <div class="chat-message-body">
         <p class="chat-role">${message.role === "user" ? "You" : "Second Brain"}</p>
-        <div class="chat-text">${formatMessageText(message.content)}</div>
-        ${renderChatContexts(message)}
-        ${message.sources?.length ? renderChatSources(message.sources) : ""}
+        ${message.role === "user" ? renderChatMessageContext(message.context) : ""}
+        ${message.isPending ? renderTypingIndicator() : `<div class="chat-text">${formatMessageText(message.content)}</div>`}
+        ${message.isPending ? "" : renderChatContexts(message)}
+        ${message.isPending ? "" : message.sources?.length ? renderChatSources(message.sources) : ""}
       </div>
     </article>
-  `).join("");
+  `).join("")}`;
 
   requestAnimationFrame(() => {
     chatTimeline.scrollTop = chatTimeline.scrollHeight;
   });
+}
+
+function renderDeepWorkFocusCard() {
+  if (!state.deepWorkEnabled || !state.deepWorkGoal) return "";
+  return `
+    <aside class="deep-work-card" aria-label="Deep Work focus">
+      <span>Deep Work</span>
+      <p>${escapeHtml(state.deepWorkGoal)}</p>
+      ${state.deepWorkSessionPath ? `<button type="button" data-open-note="${escapeHtml(state.deepWorkSessionPath)}">Open log</button>` : ""}
+      <button type="button" data-deep-work-edit>Edit</button>
+    </aside>
+  `;
+}
+
+function renderTypingIndicator() {
+  return `
+    <div class="typing-indicator" aria-label="Assistant is thinking">
+      <span></span>
+      <span></span>
+      <span></span>
+    </div>
+  `;
+}
+
+function renderChatMessageContext(context) {
+  const items = Array.isArray(context) ? context : [];
+  if (!items.length) return "";
+  return `
+    <div class="chat-message-context" aria-label="Message context">
+      ${items.map((item) => renderChatContextChip(item)).join("")}
+    </div>
+  `;
 }
 
 function renderChatContexts(message) {
@@ -1732,10 +2306,217 @@ function renderChatSources(sources) {
 }
 
 function formatMessageText(value) {
+  return renderSafeMarkdown(value);
+}
+
+function renderSafeMarkdown(value) {
+  const lines = String(value || "").replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fence = line.match(/^```(\S*)\s*$/);
+    if (fence) {
+      const lang = fence[1] || "";
+      const code = [];
+      index += 1;
+      while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(renderMarkdownCodeBlock(code.join("\n"), lang));
+      continue;
+    }
+
+    if (/^\s*(?:---|\*\*\*|___)\s*$/.test(line)) {
+      blocks.push("<hr />");
+      index += 1;
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      const tableLines = [];
+      while (index < lines.length && isMarkdownTableRow(lines[index])) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      blocks.push(renderMarkdownTable(tableLines));
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,4})\s+(.+?)\s*$/);
+    if (heading) {
+      const level = Math.min(heading[1].length + 2, 6);
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (/^>\s?/.test(line)) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(renderMarkdownQuote(quoteLines));
+      continue;
+    }
+
+    if (isMarkdownListLine(line)) {
+      const ordered = isOrderedMarkdownListLine(line);
+      const items = [];
+      while (index < lines.length && isMarkdownListLine(lines[index]) && isOrderedMarkdownListLine(lines[index]) === ordered) {
+        items.push(lines[index].replace(ordered ? /^\s*\d+[.)]\s+/ : /^\s*[-*+]\s+/, ""));
+        index += 1;
+      }
+      const tag = ordered ? "ol" : "ul";
+      blocks.push(`<${tag}>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${tag}>`);
+      continue;
+    }
+
+    const paragraph = [line.trim()];
+    index += 1;
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^```/.test(lines[index]) &&
+      !/^#{1,4}\s+/.test(lines[index]) &&
+      !/^>\s?/.test(lines[index]) &&
+      !isMarkdownTableStart(lines, index) &&
+      !isMarkdownListLine(lines[index]) &&
+      !/^\s*(?:---|\*\*\*|___)\s*$/.test(lines[index])
+    ) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+  }
+
+  return blocks.join("");
+}
+
+function renderMarkdownCodeBlock(code, lang) {
+  const language = lang ? ` data-language="${escapeHtml(lang)}"` : "";
+  return `<pre class="chat-code-block"${language}><code>${escapeHtml(code)}</code></pre>`;
+}
+
+function renderMarkdownTable(lines) {
+  const [headerLine, , ...bodyLines] = lines;
+  const headers = splitMarkdownTableRow(headerLine);
+  const rows = bodyLines.map(splitMarkdownTableRow);
+  return `
+    <div class="chat-table-wrap">
+      <table class="chat-table">
+        <thead>
+          <tr>${headers.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("")}</tr>
+        </thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>${headers.map((_, index) => `<td>${renderInlineMarkdown(row[index] || "")}</td>`).join("")}</tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function isMarkdownTableStart(lines, index) {
+  return isMarkdownTableRow(lines[index]) && isMarkdownTableSeparator(lines[index + 1] || "");
+}
+
+function isMarkdownTableRow(line) {
+  const trimmed = String(line || "").trim();
+  return trimmed.includes("|") && /^\|?.+\|.+\|?$/.test(trimmed);
+}
+
+function isMarkdownTableSeparator(line) {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function splitMarkdownTableRow(line) {
+  let trimmed = String(line || "").trim();
+  if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+  if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function renderMarkdownQuote(lines) {
+  const first = lines[0] || "";
+  const callout = first.match(/^\[!([A-Za-z0-9_-]+)]\s*(.*)$/);
+  if (callout) {
+    const [, type, title] = callout;
+    const body = lines.slice(1).join("\n").trim();
+    return `
+      <aside class="chat-callout chat-callout-${escapeHtml(type.toLowerCase())}">
+        <p class="chat-callout-title">${escapeHtml(title || type)}</p>
+        ${body ? renderSafeMarkdown(body) : ""}
+      </aside>
+    `;
+  }
+  return `<blockquote>${renderSafeMarkdown(lines.join("\n"))}</blockquote>`;
+}
+
+function isMarkdownListLine(line) {
+  return /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line);
+}
+
+function isOrderedMarkdownListLine(line) {
+  return /^\s*\d+[.)]\s+/.test(line);
+}
+
+function renderInlineMarkdown(value) {
+  const parts = String(value || "").split(/(`[^`]*`)/g);
+  return parts.map((part) => {
+    if (/^`[^`]*`$/.test(part)) {
+      return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
+    }
+    return renderInlineMarkdownText(part);
+  }).join("");
+}
+
+function renderInlineMarkdownText(value) {
+  let html = "";
+  const linkPattern = /\[([^\]]+)]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+  let lastIndex = 0;
+  for (const match of value.matchAll(linkPattern)) {
+    html += renderInlineDecorators(value.slice(lastIndex, match.index));
+    html += renderMarkdownLink(match[1], match[2]);
+    lastIndex = match.index + match[0].length;
+  }
+  html += renderInlineDecorators(value.slice(lastIndex));
+  return html;
+}
+
+function renderMarkdownLink(label, href) {
+  const safeHref = normalizeSafeLink(href);
+  if (!safeHref) return renderInlineDecorators(label);
+  const external = /^https?:/i.test(safeHref);
+  const target = external ? ` target="_blank" rel="noopener noreferrer"` : "";
+  return `<a href="${escapeHtml(safeHref)}"${target}>${renderInlineDecorators(label)}</a>`;
+}
+
+function normalizeSafeLink(href) {
+  const url = String(href || "").trim();
+  if (/^(https?:|mailto:|obsidian:)/i.test(url)) return url;
+  if (/^[/.#][^\s]*$/.test(url)) return url;
+  return "";
+}
+
+function renderInlineDecorators(value) {
   return escapeHtml(value)
-    .split(/\n{2,}/)
-    .map((paragraph) => `<p>${paragraph.replace(/\n/g, "<br>")}</p>`)
-    .join("");
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/\*([^*\s][^*]*?)\*/g, "<em>$1</em>")
+    .replace(/_([^_\s][^_]*?)_/g, "<em>$1</em>");
 }
 
 function renderTimeline() {
@@ -1914,6 +2695,19 @@ function renderIndexStatus() {
     <p class="index-meta">Last indexed: ${escapeHtml(lastRun)}</p>
     <p class="index-meta">Watcher: ${escapeHtml(watcher)}</p>
   `;
+  renderTasksBadge(status.openTaskCount);
+}
+
+function renderTasksBadge(count = null) {
+  const openCount = Number(count ?? state.indexStatus?.openTaskCount ?? state.dashboard?.taskSummary?.openCount ?? state.tasksTotal ?? 0);
+  if (tasksNavBadge) {
+    tasksNavBadge.hidden = !openCount;
+    tasksNavBadge.textContent = openCount > 99 ? "99+" : String(openCount);
+  }
+  if (tasksCount) {
+    const label = state.taskStatus === "open" ? "open" : state.taskStatus;
+    tasksCount.textContent = `${numberFormat(state.tasksTotal)} ${label}`;
+  }
 }
 
 function renderDashboard() {
@@ -2085,7 +2879,7 @@ function renderSearchError(message) {
 
 function renderTasks() {
   if (!tasksList || !tasksCount) return;
-  tasksCount.textContent = `${state.tasksTotal} ${state.taskStatus}`;
+  renderTasksBadge();
   renderTaskFilterState();
 
   if (!state.tasks.length) {
@@ -2258,6 +3052,7 @@ function shouldSubmitCaptureFromKeyboard(event) {
 }
 
 function flashHelper(message, { restoreText = "" } = {}) {
+  if (!helperLine) return;
   helperLine.textContent = message;
   window.clearTimeout(flashHelper.timer);
   flashHelper.timer = window.setTimeout(() => {

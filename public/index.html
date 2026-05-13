@@ -77,7 +77,7 @@
             <svg aria-hidden="true"><use href="#icon-chat"></use></svg><span>Chat</span>
           </button>
           <button class="nav-item" type="button" data-tab="tasks">
-            <svg aria-hidden="true"><use href="#icon-todo"></use></svg><span>Tasks</span>
+            <span class="nav-icon-wrap"><svg aria-hidden="true"><use href="#icon-todo"></use></svg><span class="nav-badge" id="tasks-nav-badge" hidden>0</span></span><span>Tasks</span>
           </button>
           <button class="nav-item" type="button" data-tab="mentors">
             <svg aria-hidden="true"><use href="#icon-mentors"></use></svg><span>Mentors</span>
@@ -88,24 +88,13 @@
         </nav>
 
         <section class="tab-panel is-active" data-tab-panel="capture" aria-label="Capture">
-          <header class="top-bar">
-            <div>
-              <p class="eyebrow">fleeting · <span id="current-month">loading</span></p>
-              <h1>Capture</h1>
+          <div class="timeline-controls">
+            <div class="capture-view-toggle" role="group" aria-label="Capture timeline view">
+              <button class="view-option is-active" type="button" data-capture-view="today">Today</button>
+              <button class="view-option" type="button" data-capture-view="week">This week</button>
+              <button class="view-option" type="button" data-capture-view="month">Month</button>
             </div>
-            <div class="top-actions">
-              <div class="capture-view-toggle" role="group" aria-label="Capture timeline view">
-                <button class="view-option is-active" type="button" data-capture-view="today">Today</button>
-                <button class="view-option" type="button" data-capture-view="week">This week</button>
-                <button class="view-option" type="button" data-capture-view="month">Month</button>
-              </div>
-              <div class="vault-pill" aria-live="polite">
-                <span class="status-dot"></span>
-                <span id="vault-name">vault</span>
-              </div>
-            </div>
-          </header>
-
+          </div>
           <section class="timeline" id="timeline" aria-live="polite" aria-label="Recent captures">
             <div class="empty-state">
               <p class="empty-title">Nothing in this month yet.</p>
@@ -148,22 +137,20 @@
               </button>
             </div>
 
-            <p class="helper-line" id="helper-line"></p>
+            <p class="helper-line" id="helper-line" aria-live="polite" aria-atomic="true"></p>
           </form>
         </section>
 
         <section class="tab-panel" data-tab-panel="chat" aria-label="Chat" hidden>
-          <header class="top-bar">
-            <div>
-              <p class="eyebrow">thinking layer · vault-aware</p>
-              <h1>Chat</h1>
-            </div>
-            <div class="chat-header-actions">
-              <button class="session-button" id="chat-session-history" type="button" aria-expanded="false">Sessions</button>
-              <div class="vault-pill"><span class="status-dot"></span><span id="chat-status">Local index</span></div>
-              <div class="session-popover" id="chat-session-popover" hidden></div>
-            </div>
-          </header>
+          <div class="chat-session-bar">
+            <button class="hamburger-button" id="chat-session-history" type="button" aria-label="Open chat sessions" aria-expanded="false">
+              <span></span>
+              <span></span>
+              <span></span>
+            </button>
+            <div class="model-pill"><span id="chat-status">Local index</span></div>
+            <div class="session-popover" id="chat-session-popover" hidden></div>
+          </div>
           <section class="chat-timeline" id="chat-timeline" aria-live="polite" aria-label="Chat messages">
             <div class="empty-state chat-empty">
               <p class="empty-title">Ask the vault.</p>
@@ -173,11 +160,13 @@
           <form class="composer chat-composer" id="chat-form">
             <div class="chat-composer-tools">
               <button class="session-button" id="chat-new-session" type="button">New</button>
+              <button class="deep-work-toggle" id="deep-work-toggle" type="button" aria-pressed="false">Deep Work</button>
               <button class="thinking-toggle" type="button" data-chat-thinking="enabled" aria-pressed="false">
                 <span>Thinking</span>
                 <span class="toggle-bubble" aria-hidden="true"></span>
               </button>
             </div>
+            <div class="chat-context-panel" id="chat-context-panel" aria-label="Selected chat context" hidden></div>
             <div class="input-row">
               <label class="sr-only" for="chat-text">Chat message</label>
               <textarea
@@ -194,21 +183,14 @@
               </button>
             </div>
             <div class="chat-suggestion-popover" id="chat-suggestions" hidden></div>
-            <p class="helper-line" id="chat-helper-line"></p>
+            <p class="helper-line" id="chat-helper-line" aria-live="polite" aria-atomic="true"></p>
           </form>
         </section>
 
         <section class="tab-panel" data-tab-panel="tasks" aria-label="Tasks" hidden>
-          <header class="top-bar">
-            <div>
-              <p class="eyebrow">execution layer · indexed</p>
-              <h1>Tasks</h1>
-            </div>
-            <div class="vault-pill"><span class="status-dot"></span><span id="tasks-count">0 open</span></div>
-          </header>
           <section class="workspace-view">
             <div class="view-toolbar">
-              <p>Open Markdown tasks from the indexed vault.</p>
+              <p><span id="tasks-count">0 open</span></p>
               <div class="toolbar-actions">
                 <button class="secondary-button" id="tasks-refresh-button" type="button">Refresh</button>
               </div>
@@ -265,13 +247,6 @@
         </section>
 
         <section class="tab-panel" data-tab-panel="mentors" aria-label="Mentors" hidden>
-          <header class="top-bar">
-            <div>
-              <p class="eyebrow">perspective layer · planned</p>
-              <h1>Mentors</h1>
-            </div>
-            <div class="vault-pill"><span class="status-dot"></span><span>WIP</span></div>
-          </header>
           <section class="placeholder-view">
             <article class="placeholder-card">
               <p class="placeholder-kicker">Work in progress</p>
@@ -282,14 +257,13 @@
         </section>
 
         <section class="tab-panel" data-tab-panel="dashboard" aria-label="Dashboard" hidden>
-          <header class="top-bar">
-            <div>
-              <p class="eyebrow">awareness layer · local index</p>
-              <h1>Dashboard</h1>
-            </div>
-            <button class="secondary-button" id="index-run-button" type="button">Rebuild index</button>
-          </header>
           <section class="workspace-view">
+            <div class="view-toolbar">
+              <p>Local index and system overview.</p>
+              <div class="toolbar-actions">
+                <button class="secondary-button" id="index-run-button" type="button">Rebuild index</button>
+              </div>
+            </div>
             <div class="index-grid" id="index-status">
               <div class="empty-state">
                 <p class="empty-title">Checking index...</p>
@@ -444,6 +418,51 @@
         <div class="sheet-actions">
           <button class="secondary-button" type="button" data-auth-cancel>Cancel</button>
           <button class="primary-button" id="auth-confirm" type="button">Save passcode</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="todo-sheet" id="deep-work-sheet" hidden>
+      <button class="sheet-backdrop" type="button" aria-label="Close Deep Work setup" data-deep-work-cancel></button>
+      <section class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="deep-work-title">
+        <div class="sheet-header">
+          <div>
+            <p class="eyebrow">deep work</p>
+            <h2 id="deep-work-title">Set a focus goal</h2>
+          </div>
+          <button class="sheet-close" type="button" aria-label="Close Deep Work setup" data-deep-work-cancel>×</button>
+        </div>
+
+        <label class="edit-field" for="deep-work-goal">
+          <span>Goal</span>
+          <textarea id="deep-work-goal" rows="3" spellcheck="true" placeholder="What should this chat stay focused on?"></textarea>
+        </label>
+
+        <p class="quiet-line">While active, chat responses will bias toward this goal and avoid drifting unless you ask to change focus.</p>
+
+        <div class="sheet-actions">
+          <button class="secondary-button" type="button" id="deep-work-stop">Stop Deep Work</button>
+          <button class="secondary-button" type="button" data-deep-work-cancel>Cancel</button>
+          <button class="primary-button" id="deep-work-confirm" type="button">Start</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="todo-sheet" id="context-sheet" hidden>
+      <button class="sheet-backdrop" type="button" aria-label="Close context details" data-context-cancel></button>
+      <section class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="context-sheet-title">
+        <div class="sheet-header">
+          <div>
+            <p class="eyebrow">chat context</p>
+            <h2 id="context-sheet-title">Selected sources</h2>
+          </div>
+          <button class="sheet-close" type="button" aria-label="Close context details" data-context-cancel>×</button>
+        </div>
+
+        <div class="context-detail-list" id="context-detail-list"></div>
+
+        <div class="sheet-actions">
+          <button class="secondary-button" type="button" data-context-cancel>Close</button>
         </div>
       </section>
     </div>

@@ -37,6 +37,7 @@ const DEEPSEEK_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT === "max
 const CHAT_CONTEXT_LIMIT = Math.min(Number(process.env.CHAT_CONTEXT_LIMIT || "6"), 12);
 const CHAT_HISTORY_LIMIT = Math.min(Number(process.env.CHAT_HISTORY_LIMIT || "8"), 16);
 const CHAT_SESSIONS_DIR = normalizeVaultRelativeDir(process.env.CHAT_SESSIONS_DIR || "3.Resources/gpt/sessions");
+const DEEP_WORK_SESSIONS_DIR = normalizeVaultRelativeDir(process.env.DEEP_WORK_SESSIONS_DIR || `${CHAT_SESSIONS_DIR}/deep-work`);
 const INDEX_IGNORE_FILE = process.env.INDEX_IGNORE_FILE
   ? path.resolve(__dirname, process.env.INDEX_IGNORE_FILE)
   : path.join(__dirname, ".second-brain-ignore");
@@ -171,6 +172,30 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 201, await createChatSession(body));
     }
 
+    if (url.pathname === "/api/chat/session/update" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await updateChatSession(body));
+    }
+
+    if (url.pathname === "/api/chat/session/delete" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await deleteChatSession(body));
+    }
+
+    if (url.pathname === "/api/deep-work/start" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await startDeepWorkSession(body));
+    }
+
+    if (url.pathname === "/api/deep-work/stop" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await stopDeepWorkSession(body));
+    }
+
     if (url.pathname === "/api/tasks" && req.method === "GET") {
       const status = url.searchParams.get("status") || "open";
       const scope = url.searchParams.get("scope") || "all";
@@ -288,6 +313,7 @@ async function getHealth() {
 async function getPublicConfig() {
   const ignoreRules = await getIndexIgnoreRulePreview();
   const backups = await getBackupState();
+  const chatRuntime = await getChatRuntimeStatus();
   return {
     appName: "Second Brain Capture",
     vaultName: path.basename(VAULT_PATH),
@@ -315,7 +341,8 @@ async function getPublicConfig() {
       contextLimit: CHAT_CONTEXT_LIMIT,
       sessionsDir: isOpenCodeChatProvider() ? "OpenCode /session" : CHAT_SESSIONS_DIR,
       opencodeBaseUrl: isOpenCodeChatProvider() ? OPENCODE_BASE_URL : "",
-      agent: isOpenCodeChatProvider() ? (OPENCODE_AGENT || "OpenCode default") : ""
+      agent: isOpenCodeChatProvider() ? (OPENCODE_AGENT || "OpenCode default") : "",
+      runtime: chatRuntime
     },
     categories: Array.from(CAPTURE_CATEGORIES)
   };
@@ -712,11 +739,12 @@ async function answerDeepSeekChat(body) {
   const message = normalizeChatMessage(body?.message);
   const history = normalizeChatHistory(body?.history);
   const thinkingMode = normalizeThinkingMode(body?.thinkingMode);
+  const deepWork = normalizeDeepWork(body?.deepWork);
   const references = parseChatReferences(message, body);
   const requestedSessionPath = normalizeOptionalChatSessionPath(body?.sessionPath);
   const existingSession = requestedSessionPath ? await readChatSessionMetadata(requestedSessionPath) : null;
   const [sources, explicitMentor, explicitAssistant, people, autoSkills] = await Promise.all([
-    retrieveChatSources(message, CHAT_CONTEXT_LIMIT),
+    retrieveChatSources([deepWork.goal, message].filter(Boolean).join(" "), CHAT_CONTEXT_LIMIT),
     references.mentor ? getSkillPrompt("mentor", references.mentor) : Promise.resolve(null),
     references.skill ? getSkillPromptAny(references.skill) : references.assistant ? getSkillPrompt("assistant", references.assistant) : Promise.resolve(null),
     references.people.length ? getPeopleContexts(references.people) : Promise.resolve([]),
@@ -729,12 +757,23 @@ async function answerDeepSeekChat(body) {
     throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable vault-aware chat.");
   }
 
-  const response = await callDeepSeekChatCompletion({ message, history, sources, mentor, assistant, people, thinkingMode });
+  const response = await callDeepSeekChatCompletion({ message, history, sources, mentor, assistant, people, thinkingMode, deepWork });
   const session = existingSession || await createChatSession({ title: deriveChatSessionTitle(message) });
   await appendChatSessionExchange({
     sessionPath: session.path,
     message,
     response,
+    mentor,
+    assistant,
+    people,
+    sources
+  });
+  await appendDeepWorkExchange({
+    deepWork,
+    chatSession: session,
+    message,
+    response,
+    skill: explicitAssistant,
     mentor,
     assistant,
     people,
@@ -749,12 +788,14 @@ async function answerDeepSeekChat(body) {
     mentor: mentor ? formatContextSource(mentor) : null,
     assistant: assistant ? formatContextSource(assistant) : null,
     people: people.map(formatContextSource),
-    sources: sources.map(formatChatSource)
+    sources: sources.map(formatChatSource),
+    deepWork
   };
 }
 
 async function answerOpenCodeChat(body) {
   const message = normalizeChatMessage(body?.message);
+  const deepWork = normalizeDeepWork(body?.deepWork);
   const references = parseChatReferences(message, body);
   const session = await ensureOpenCodeSession(body?.sessionPath, message);
   const [skill, people, files] = await Promise.all([
@@ -768,24 +809,57 @@ async function answerOpenCodeChat(body) {
     thinkingMode: normalizeThinkingMode(body?.thinkingMode),
     skill,
     people,
-    files
+    files,
+    deepWork
+  });
+
+  const updatedSession = await getOpenCodeSession(session.id).catch(() => session);
+  await appendDeepWorkExchange({
+    deepWork,
+    chatSession: updatedSession,
+    message,
+    response,
+    skill,
+    people,
+    sources: files
   });
 
   return {
     answer: response.answer,
     model: response.model,
     thinkingMode: response.thinkingMode,
-    session,
+    session: updatedSession,
     mentor: null,
     assistant: skill ? formatContextSource(skill) : null,
     people: people.map(formatContextSource),
-    sources: files.map(formatChatSource)
+    sources: files.map(formatChatSource),
+    deepWork
   };
 }
 
 function normalizeOptionalChatSessionPath(sessionPath) {
   const cleanPath = String(sessionPath || "").trim();
   return cleanPath ? normalizeChatSessionPath(cleanPath) : "";
+}
+
+function normalizeDeepWork(value = {}) {
+  const goal = String(value?.goal || "").replace(/\s+/g, " ").trim().slice(0, 500);
+  return {
+    enabled: Boolean(value?.enabled && goal),
+    goal,
+    sessionPath: normalizeOptionalDeepWorkSessionPath(value?.sessionPath)
+  };
+}
+
+function normalizeOptionalDeepWorkSessionPath(sessionPath) {
+  const cleanPath = String(sessionPath || "").trim().replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!cleanPath) return "";
+  if (!cleanPath.endsWith(".md")) throw httpError(400, "Deep Work session path must be a Markdown file.");
+  if (!cleanPath.startsWith(`${DEEP_WORK_SESSIONS_DIR}/`)) {
+    throw httpError(400, "Deep Work session path is outside the configured Deep Work folder.");
+  }
+  if (cleanPath.includes("..")) throw httpError(400, "Invalid Deep Work session path.");
+  return cleanPath;
 }
 
 function getChatProvider() {
@@ -820,6 +894,72 @@ async function getChatModels() {
     thinkingModel: OPENCODE_THINKING_MODEL,
     models
   };
+}
+
+async function getChatRuntimeStatus() {
+  if (!isOpenCodeChatProvider()) {
+    return {
+      provider: "deepseek",
+      status: DEEPSEEK_API_KEY ? "configured" : "missing-key",
+      reachable: Boolean(DEEPSEEK_API_KEY),
+      checkedAt: new Date().toISOString(),
+      detail: DEEPSEEK_API_KEY ? "DeepSeek API key configured" : "DEEPSEEK_API_KEY is not configured"
+    };
+  }
+
+  const started = Date.now();
+  const headers = { "Accept": "application/json" };
+  if (OPENCODE_SERVER_PASSWORD) {
+    headers.Authorization = `Basic ${Buffer.from(`${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}`).toString("base64")}`;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1400);
+  try {
+    const response = await fetch(`${OPENCODE_BASE_URL}/session`, {
+      headers,
+      signal: controller.signal
+    });
+    const durationMs = Date.now() - started;
+    if (!response.ok) {
+      return {
+        provider: "opencode",
+        status: "error",
+        reachable: false,
+        baseUrl: OPENCODE_BASE_URL,
+        agent: OPENCODE_AGENT || "OpenCode default",
+        checkedAt: new Date().toISOString(),
+        latencyMs: durationMs,
+        detail: `OpenCode responded with HTTP ${response.status}`
+      };
+    }
+    const data = await response.json().catch(() => []);
+    const sessionCount = Array.isArray(data) ? data.length : Array.isArray(data?.sessions) ? data.sessions.length : null;
+    return {
+      provider: "opencode",
+      status: "online",
+      reachable: true,
+      baseUrl: OPENCODE_BASE_URL,
+      agent: OPENCODE_AGENT || "OpenCode default",
+      checkedAt: new Date().toISOString(),
+      latencyMs: durationMs,
+      detail: sessionCount === null ? "OpenCode reachable" : `${sessionCount} session${sessionCount === 1 ? "" : "s"} visible`
+    };
+  } catch (error) {
+    return {
+      provider: "opencode",
+      status: "offline",
+      reachable: false,
+      baseUrl: OPENCODE_BASE_URL,
+      agent: OPENCODE_AGENT || "OpenCode default",
+      checkedAt: new Date().toISOString(),
+      detail: error.name === "AbortError"
+        ? "OpenCode health check timed out"
+        : `OpenCode is not reachable at ${OPENCODE_BASE_URL}`
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function summarizeChatCapture(body = {}) {
@@ -985,15 +1125,142 @@ async function readChatSessionMetadata(sessionPath) {
 async function ensureOpenCodeSession(sessionPath, firstMessage = "") {
   const id = normalizeOpenCodeSessionId(sessionPath);
   if (id) return getOpenCodeSession(id);
-  return createOpenCodeSession({ title: deriveChatSessionTitle(firstMessage) });
+  return createOpenCodeSession({});
 }
 
 async function createOpenCodeSession(body = {}) {
   const title = normalizeSessionTitle(body?.title) || "New chat";
+  const payload = normalizeSessionTitle(body?.title) ? { title } : {};
   return formatOpenCodeSession(await openCodeFetch("/session", {
     method: "POST",
-    body: { title }
+    body: payload
   }));
+}
+
+async function updateChatSession(body = {}) {
+  const title = normalizeSessionTitle(body?.title);
+  if (!title) throw httpError(400, "Session title is required.");
+  if (isOpenCodeChatProvider()) return updateOpenCodeSession(body?.path || body?.sessionPath, title);
+  return updateMarkdownChatSession(body?.path || body?.sessionPath, title);
+}
+
+async function deleteChatSession(body = {}) {
+  if (isOpenCodeChatProvider()) return deleteOpenCodeSession(body?.path || body?.sessionPath);
+  return deleteMarkdownChatSession(body?.path || body?.sessionPath);
+}
+
+async function updateOpenCodeSession(sessionPath, title) {
+  const id = normalizeOpenCodeSessionId(sessionPath);
+  if (!id) throw httpError(400, "OpenCode session id is required.");
+  return {
+    session: formatOpenCodeSession(await openCodeFetch(`/session/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: { title }
+    }))
+  };
+}
+
+async function deleteOpenCodeSession(sessionPath) {
+  const id = normalizeOpenCodeSessionId(sessionPath);
+  if (!id) throw httpError(400, "OpenCode session id is required.");
+  await openCodeFetch(`/session/${encodeURIComponent(id)}`, { method: "DELETE" });
+  return { deleted: true, path: `opencode:${id}` };
+}
+
+async function updateMarkdownChatSession(sessionPath, title) {
+  const session = await readChatSessionMetadata(sessionPath);
+  const filePath = resolveChatSessionPath(session.path);
+  const markdown = await fs.readFile(filePath, "utf8");
+  const now = new Date().toISOString();
+  const nextMarkdown = updateFrontmatterField(updateFrontmatterField(markdown, "title", quoteYaml(title)), "updated", now);
+  await fs.writeFile(filePath, nextMarkdown, "utf8");
+  return { session: await readChatSessionMetadata(session.path) };
+}
+
+async function deleteMarkdownChatSession(sessionPath) {
+  const session = await readChatSessionMetadata(sessionPath);
+  await fs.unlink(resolveChatSessionPath(session.path));
+  return { deleted: true, path: session.path };
+}
+
+async function startDeepWorkSession(body = {}) {
+  const goal = String(body?.goal || "").replace(/\s+/g, " ").trim().slice(0, 500);
+  if (!goal) throw httpError(400, "Deep Work goal is required.");
+  const now = new Date();
+  const existingPath = normalizeOptionalDeepWorkSessionPath(body?.sessionPath);
+  if (existingPath) {
+    try {
+      const filePath = resolveVaultRelativePath(existingPath);
+      const markdown = await fs.readFile(filePath, "utf8");
+      const updated = updateFrontmatterField(
+        updateFrontmatterField(
+          updateFrontmatterField(markdown, "goal", quoteYaml(goal)),
+          "status",
+          "active"
+        ),
+        "updated",
+        now.toISOString()
+      );
+      await fs.writeFile(filePath, updated, "utf8");
+      return {
+        path: existingPath,
+        goal,
+        status: "active",
+        updated: now.toISOString()
+      };
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+
+  await fs.mkdir(resolveVaultRelativePath(DEEP_WORK_SESSIONS_DIR), { recursive: true });
+  const slug = slugifyLookup(goal).slice(0, 48) || "focus";
+  const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  const relativePath = `${DEEP_WORK_SESSIONS_DIR}/${stamp}-${slug}.md`;
+  const markdown = [
+    "---",
+    `id: deep-work-${hash(relativePath).slice(0, 12)}`,
+    "type: deep-work-session",
+    "status: active",
+    `goal: ${quoteYaml(goal)}`,
+    `created: ${now.toISOString()}`,
+    `updated: ${now.toISOString()}`,
+    "linked_notes: []",
+    "---",
+    `# Deep Work — ${goal}`,
+    "",
+    "## Goal",
+    goal,
+    "",
+    "## Conversation"
+  ].join("\n");
+  await fs.writeFile(resolveVaultRelativePath(relativePath), `${markdown}\n`, "utf8");
+  return {
+    path: relativePath,
+    goal,
+    status: "active",
+    created: now.toISOString(),
+    updated: now.toISOString()
+  };
+}
+
+async function stopDeepWorkSession(body = {}) {
+  const sessionPath = normalizeOptionalDeepWorkSessionPath(body?.sessionPath);
+  if (!sessionPath) return { stopped: true, path: "" };
+  const now = new Date().toISOString();
+  const filePath = resolveVaultRelativePath(sessionPath);
+  const markdown = await fs.readFile(filePath, "utf8");
+  const updated = updateFrontmatterField(
+    updateFrontmatterField(
+      updateFrontmatterField(markdown, "status", "completed"),
+      "ended",
+      now
+    ),
+    "updated",
+    now
+  );
+  await fs.writeFile(filePath, updated, "utf8");
+  return { stopped: true, path: sessionPath, status: "completed", updated: now };
 }
 
 async function listOpenCodeSessions(limit = 20) {
@@ -1128,9 +1395,9 @@ function formatOpenCodeMessages(items) {
     .filter(Boolean);
 }
 
-async function callOpenCodeChatCompletion({ sessionId, message, thinkingMode, skill, people, files }) {
+async function callOpenCodeChatCompletion({ sessionId, message, thinkingMode, skill, people, files, deepWork }) {
   const modelRef = getOpenCodeModelRef(thinkingMode);
-  const prompt = buildOpenCodePrompt({ message, skill, people, files });
+  const prompt = buildOpenCodePrompt({ message, skill, people, files, deepWork });
   const body = {
     model: modelRef,
     parts: [{ type: "text", text: prompt }]
@@ -1172,8 +1439,15 @@ async function callOpenCodeCaptureSummary({ category, text }) {
   return summary;
 }
 
-function buildOpenCodePrompt({ message, skill, people, files }) {
+function buildOpenCodePrompt({ message, skill, people, files, deepWork }) {
   const contextBlocks = [];
+  if (deepWork?.enabled) {
+    contextBlocks.push([
+      "Deep Work mode:",
+      `Goal: ${deepWork.goal}`,
+      "Stay focused on this goal. Bias the response toward the current session objective and avoid unrelated exploration unless the user explicitly asks."
+    ].join("\n"));
+  }
   if (skill) {
     contextBlocks.push([
       `Selected skill context (${skill.path}):`,
@@ -1185,7 +1459,7 @@ function buildOpenCodePrompt({ message, skill, people, files }) {
       "Selected people context:",
       people.map((person) => [
         `${person.title || person.name} (${person.path}):`,
-        clipText(person.content, 1200)
+        person.content
       ].join("\n")).join("\n\n")
     ].join("\n"));
   }
@@ -1194,7 +1468,7 @@ function buildOpenCodePrompt({ message, skill, people, files }) {
       "Selected file context:",
       files.map((file) => [
         `${file.title} (${file.path}):`,
-        clipText(file.content || file.snippet, 1400)
+        file.content || file.snippet || ""
       ].join("\n")).join("\n\n")
     ].join("\n"));
   }
@@ -1217,7 +1491,7 @@ function getOpenCodeMessageRole(item = {}) {
 function extractOpenCodeText(item = {}) {
   const parts = Array.isArray(item.parts) ? item.parts : [];
   return parts
-    .filter((part) => String(part.type || "").toLowerCase() === "text" || typeof part.text === "string")
+    .filter((part) => String(part.type || "").toLowerCase() === "text")
     .map((part) => part.text || part.content || "")
     .filter(Boolean)
     .join("\n")
@@ -1283,6 +1557,37 @@ function formatChatSessionExchange({ date, message, response, mentor, assistant,
     "",
     response.answer.trim()
   ].join("\n");
+}
+
+async function appendDeepWorkExchange({ deepWork, chatSession, message, response, skill, mentor, assistant, people, sources }) {
+  if (!deepWork?.enabled || !deepWork.sessionPath) return;
+  const relativePath = normalizeOptionalDeepWorkSessionPath(deepWork.sessionPath);
+  const filePath = resolveVaultRelativePath(relativePath);
+  const now = new Date();
+  const markdown = await fs.readFile(filePath, "utf8");
+  const contextLines = [
+    chatSession?.path ? `chat_session:: ${chatSession.path.startsWith("opencode:") ? chatSession.path : `[[${chatSession.path}|${chatSession.title || "chat session"}]]`}` : "",
+    skill ? `skill:: [[${skill.path}|${skill.title || skill.name || "skill"}]]` : "",
+    mentor ? `mentor:: [[${mentor.path}|${mentor.title || mentor.name || "mentor"}]]` : "",
+    assistant ? `assistant:: [[${assistant.path}|${assistant.title || assistant.name || "assistant"}]]` : "",
+    ...(people || []).map((person) => `person:: [[${person.path}|${person.title || person.name || "person"}]]`),
+    ...(sources || []).slice(0, 8).map((source) => `source:: [[${source.path}|${source.title || source.path}]]`)
+  ].filter(Boolean);
+  const entry = [
+    `### ${formatTimestamp(now)} — User`,
+    "",
+    message.trim(),
+    "",
+    `### ${formatTimestamp(now)} — Assistant`,
+    "",
+    `model:: ${response.model || ""}`,
+    `thinking:: ${response.thinkingMode || ""}`,
+    ...contextLines,
+    "",
+    response.answer.trim()
+  ].join("\n");
+  const updated = updateFrontmatterField(markdown, "updated", now.toISOString());
+  await fs.writeFile(filePath, `${updated.trimEnd()}\n\n${entry}\n`, "utf8");
 }
 
 function parseChatSessionMessages(markdown) {
@@ -1364,17 +1669,17 @@ function parseChatReferences(message, body = {}) {
     body?.mentor,
     ...(isOpenCodeChatProvider() ? [] : Array.from(text.matchAll(/(?:^|\s)#([A-Za-z0-9_-]+)/g), (match) => match[1]))
   ]);
-  const skill = firstLookupName([
+  const skill = firstReferenceInput([
     body?.skill,
     body?.assistant,
     ...Array.from(text.matchAll(/(?:^|\s)\/([A-Za-z0-9_-]+)/g), (match) => match[1])
   ]);
   const assistant = skill;
-  const files = uniqueLookupNames([
+  const files = uniqueReferenceInputs([
     ...(Array.isArray(body?.files) ? body.files : []),
     ...(isOpenCodeChatProvider() ? Array.from(text.matchAll(/(?:^|\s)#([A-Za-z0-9_-]+)/g), (match) => match[1]) : [])
   ]);
-  const people = uniqueLookupNames([
+  const people = uniqueReferenceInputs([
     ...(Array.isArray(body?.people) ? body.people : []),
     ...Array.from(text.matchAll(/(?:^|\s)@([A-Za-z0-9_-]+)/g), (match) => match[1])
   ]);
@@ -1404,6 +1709,62 @@ function normalizeLookupName(value) {
     .replace(/^[@#/]+/, "")
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "");
+}
+
+function firstReferenceInput(values) {
+  return uniqueReferenceInputs(values)[0] || null;
+}
+
+function uniqueReferenceInputs(values) {
+  const seen = new Set();
+  const references = [];
+  for (const value of values) {
+    const reference = normalizeReferenceInput(value);
+    if (!reference) continue;
+    const key = reference.path ? `path:${reference.path.toLowerCase()}` : `lookup:${reference.lookup}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    references.push(reference);
+  }
+  return references.slice(0, 5);
+}
+
+function normalizeReferenceInput(value) {
+  if (!value) return null;
+  if (typeof value === "object") {
+    const pathValue = normalizeReferencePath(value.path);
+    const rawLookup = value.token || value.name || value.title || value.id || path.basename(pathValue || "", ".md");
+    const lookup = normalizeLookupName(rawLookup);
+    if (!pathValue && !lookup) return null;
+    return {
+      id: String(value.id || value.note_id || pathValue || lookup),
+      kind: String(value.kind || ""),
+      path: pathValue,
+      title: String(value.title || value.name || path.basename(pathValue || "", ".md") || rawLookup || ""),
+      name: String(value.name || value.title || rawLookup || ""),
+      token: String(value.token || lookup || ""),
+      lookup
+    };
+  }
+  const raw = String(value || "").trim().replace(/^[@#/]+/, "");
+  const pathValue = normalizeReferencePath(raw);
+  const lookup = normalizeLookupName(pathValue ? path.basename(pathValue, ".md") : raw);
+  if (!pathValue && !lookup) return null;
+  return {
+    id: pathValue || lookup,
+    kind: "",
+    path: pathValue,
+    title: path.basename(pathValue || raw, ".md"),
+    name: path.basename(pathValue || raw, ".md"),
+    token: lookup,
+    lookup
+  };
+}
+
+function normalizeReferencePath(value) {
+  const clean = String(value || "").trim().replace(/^#+/, "").replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!clean || clean.includes("..")) return "";
+  return clean.includes("/") && clean.toLowerCase().endsWith(".md") ? clean : "";
 }
 
 async function getSkillPrompt(type, name) {
@@ -1498,7 +1859,7 @@ function scoreSkillRoute(row, terms) {
 async function getPeopleContexts(names) {
   await ensureIndexSchema();
   const rows = await dbQuery(`
-    SELECT note_id, path, title, type, name, content, updated
+    SELECT note_id, path, title, type, name, updated
     FROM notes_metadata
     WHERE LOWER(COALESCE(type, '')) = 'people'
       AND (
@@ -1507,9 +1868,10 @@ async function getPeopleContexts(names) {
       )
     ORDER BY datetime(updated) DESC
   `);
-  return names
-    .map((name) => rows.find((row) => matchesLookup(row, name)))
+  const selectedRows = names
+    .map((name) => findContextRow(rows, name))
     .filter(Boolean);
+  return hydrateVaultContextRows(selectedRows);
 }
 
 async function getChatReferenceSuggestions(kind, query) {
@@ -1688,14 +2050,62 @@ async function getVaultFileSuggestions(query = "") {
 async function getFileContexts(names) {
   await ensureIndexSchema();
   const rows = await dbQuery(`
-    SELECT note_id, path, title, type, name, para, project, updated, snippet, content
+    SELECT note_id, path, title, type, name, para, project, updated, snippet
     FROM notes_metadata
     ORDER BY datetime(updated) DESC
     LIMIT 500
   `);
-  return names
-    .map((name) => rows.find((row) => matchesLookup(row, name)))
+  const selectedRows = names
+    .map((name) => findContextRow(rows, name))
     .filter(Boolean);
+  return hydrateVaultContextRows(selectedRows);
+}
+
+function findContextRow(rows, reference) {
+  const parsed = normalizeReferenceInput(reference);
+  if (!parsed) return null;
+  const indexedRow = rows.find((row) => matchesLookup(row, parsed));
+  if (indexedRow) return indexedRow;
+  if (!parsed.path) return null;
+  return {
+    note_id: hash(parsed.path),
+    path: parsed.path,
+    title: parsed.title || path.basename(parsed.path, ".md"),
+    type: parsed.kind || null,
+    name: parsed.name || parsed.title || path.basename(parsed.path, ".md")
+  };
+}
+
+async function hydrateVaultContextRows(rows) {
+  const hydrated = [];
+  for (const row of rows) {
+    const context = await readVaultContextRow(row).catch(() => null);
+    if (context) hydrated.push(context);
+  }
+  return hydrated;
+}
+
+async function readVaultContextRow(row) {
+  if (!row?.path) return null;
+  const filePath = resolveVaultRelativePath(row.path);
+  const [markdown, stat] = await Promise.all([
+    fs.readFile(filePath, "utf8"),
+    fs.stat(filePath)
+  ]);
+  const { frontmatter, body } = splitFrontmatter(markdown);
+  const metadata = parseFrontmatter(frontmatter);
+  const title = row.title || metadata.title || metadata.name || findFirstHeading(body) || path.basename(row.path, ".md");
+  const name = row.name || metadata.name || title;
+  return {
+    ...row,
+    note_id: row.note_id || hash(row.path),
+    title,
+    name,
+    type: row.type || metadata.type || null,
+    updated: stat.mtime.toISOString(),
+    content: markdown.trim(),
+    snippet: clipText(body || markdown, 360)
+  };
 }
 
 function mergeChatSources(sources) {
@@ -1729,13 +2139,15 @@ function suggestionSortValue(row) {
 }
 
 function matchesLookup(row, lookupName) {
+  const reference = normalizeReferenceInput(lookupName) || { lookup: normalizeLookupName(lookupName), path: "" };
+  if (reference.path && String(row.path || "").toLowerCase() === reference.path.toLowerCase()) return true;
   const candidates = [
     row.name,
     row.title,
     path.basename(row.path || "", ".md"),
     skillFolderName(row.path || "")
   ];
-  const target = slugifyLookup(lookupName);
+  const target = slugifyLookup(reference.lookup || reference.name || reference.title || lookupName);
   return candidates.some((candidate) => slugifyLookup(candidate) === target);
 }
 
@@ -1811,8 +2223,8 @@ function extractSearchTerms(message) {
   )).slice(0, 10);
 }
 
-async function callDeepSeekChatCompletion({ message, history, sources, mentor, assistant, people, thinkingMode }) {
-  const prompt = buildChatPrompt({ message, history, sources, mentor, assistant, people });
+async function callDeepSeekChatCompletion({ message, history, sources, mentor, assistant, people, thinkingMode, deepWork }) {
+  const prompt = buildChatPrompt({ message, history, sources, mentor, assistant, people, deepWork });
   const model = getDeepSeekModel(thinkingMode);
   const endpoint = `${DEEPSEEK_BASE_URL}/chat/completions`;
   const headers = {
@@ -1831,7 +2243,7 @@ async function callDeepSeekChatCompletion({ message, history, sources, mentor, a
       messages: [
         {
           role: "system",
-          content: buildChatInstructions({ mentor, assistant, people })
+          content: buildChatInstructions({ mentor, assistant, people, deepWork })
         },
         {
           role: "user",
@@ -1920,7 +2332,7 @@ function getDeepSeekModel(thinkingMode) {
   return thinkingMode === "enabled" ? DEEPSEEK_THINKING_MODEL : DEEPSEEK_REGULAR_MODEL;
 }
 
-function buildChatInstructions({ mentor, assistant, people }) {
+function buildChatInstructions({ mentor, assistant, people, deepWork }) {
   const mentorLine = mentor
     ? `${mentor.autoSelected ? "A mentor perspective was automatically selected" : "Use this mentor perspective when helpful"}: ${mentor.title || mentor.name || "mentor"}.`
     : "Use your default PKM thinking style.";
@@ -1935,13 +2347,14 @@ function buildChatInstructions({ mentor, assistant, people }) {
     "Use retrieved vault context when it is relevant, but do not pretend it contains facts it does not contain.",
     "Be concise, practical, and transparent. If context is weak or missing, say so.",
     "Do not claim to have written or changed vault files.",
+    deepWork?.enabled ? "Deep Work mode is active: stay focused on the user's stated goal, bias recommendations toward it, and avoid unrelated tangents unless asked." : "Deep Work mode is not active.",
     mentorLine,
     assistantLine,
     peopleLine
   ].join(" ");
 }
 
-function buildChatPrompt({ message, history, sources, mentor, assistant, people }) {
+function buildChatPrompt({ message, history, sources, mentor, assistant, people, deepWork }) {
   const historyText = history.length
     ? history.map((item) => `${item.role.toUpperCase()}: ${item.content}`).join("\n\n")
     : "No prior messages in this browser session.";
@@ -1962,6 +2375,9 @@ function buildChatPrompt({ message, history, sources, mentor, assistant, people 
     : "No relevant indexed notes were found.";
 
   return [
+    "Deep Work:",
+    deepWork?.enabled ? `Goal: ${deepWork.goal}` : "Not active.",
+    "",
     "Recent conversation:",
     historyText,
     "",
@@ -2644,6 +3060,24 @@ function stripMarkdown(value) {
 
 function quoteYaml(value) {
   return JSON.stringify(String(value || ""));
+}
+
+function updateFrontmatterField(markdown, key, value) {
+  if (!markdown.startsWith("---")) return markdown;
+  const end = markdown.indexOf("\n---", 3);
+  if (end === -1) return markdown;
+  const frontmatter = markdown.slice(3, end);
+  const body = markdown.slice(end);
+  const pattern = new RegExp(`^${escapeRegExp(key)}:\\s*.*$`, "m");
+  const line = `${key}: ${value}`;
+  const nextFrontmatter = pattern.test(frontmatter)
+    ? frontmatter.replace(pattern, line)
+    : `${frontmatter.trimEnd()}\n${line}\n`;
+  return `---${nextFrontmatter}${body}`;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function cleanTaskText(value) {
