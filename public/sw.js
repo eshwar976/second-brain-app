@@ -1,4 +1,4 @@
-const CACHE_NAME = "second-brain-shell-v8";
+const CACHE_NAME = "second-brain-shell-v24";
 const SHELL_ASSETS = [
   "/",
   "/index.html",

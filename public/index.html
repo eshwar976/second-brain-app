@@ -54,11 +54,11 @@
       <symbol id="icon-chat" viewBox="0 0 24 24">
         <path d="M5 6.5A3.5 3.5 0 0 1 8.5 3h7A3.5 3.5 0 0 1 19 6.5v4A3.5 3.5 0 0 1 15.5 14H11l-4.5 4v-4A3.5 3.5 0 0 1 5 10.5Z"></path>
       </symbol>
-      <symbol id="icon-mentors" viewBox="0 0 24 24">
-        <circle cx="8" cy="8" r="3"></circle>
-        <circle cx="16" cy="8" r="3"></circle>
-        <path d="M3.5 19a5 5 0 0 1 9 0"></path>
-        <path d="M11.5 19a5 5 0 0 1 9 0"></path>
+      <symbol id="icon-sprint" viewBox="0 0 24 24">
+        <path d="M5 5h14"></path>
+        <path d="M5 12h14"></path>
+        <path d="M5 19h14"></path>
+        <path d="m7 12 2 2 4-5"></path>
       </symbol>
       <symbol id="icon-dashboard" viewBox="0 0 24 24">
         <path d="M4 5h7v6H4Z"></path>
@@ -79,8 +79,8 @@
           <button class="nav-item" type="button" data-tab="tasks">
             <span class="nav-icon-wrap"><svg aria-hidden="true"><use href="#icon-todo"></use></svg><span class="nav-badge" id="tasks-nav-badge" hidden>0</span></span><span>Tasks</span>
           </button>
-          <button class="nav-item" type="button" data-tab="mentors">
-            <svg aria-hidden="true"><use href="#icon-mentors"></use></svg><span>Mentors</span>
+          <button class="nav-item" type="button" data-tab="sprint">
+            <svg aria-hidden="true"><use href="#icon-sprint"></use></svg><span>Sprint</span>
           </button>
           <button class="nav-item" type="button" data-tab="dashboard">
             <svg aria-hidden="true"><use href="#icon-dashboard"></use></svg><span>Dashboard</span>
@@ -160,6 +160,16 @@
           <form class="composer chat-composer" id="chat-form">
             <div class="chat-composer-tools">
               <button class="session-button" id="chat-new-session" type="button">New</button>
+              <div class="chat-actions-menu" id="chat-actions-menu">
+                <button class="session-button chat-actions-trigger" id="chat-actions-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Session actions">
+                  <span>Actions</span>
+                </button>
+                <div class="chat-actions-popover" id="chat-actions-popover" role="menu" hidden>
+                  <button type="button" id="chat-save-summary" role="menuitem">Save summary</button>
+                  <button type="button" id="chat-extract-todos" role="menuitem">Extract todos</button>
+                  <button type="button" id="chat-create-note" role="menuitem">Create note</button>
+                </div>
+              </div>
               <button class="deep-work-toggle" id="deep-work-toggle" type="button" aria-pressed="false">Deep Work</button>
               <button class="thinking-toggle" type="button" data-chat-thinking="enabled" aria-pressed="false">
                 <span>Thinking</span>
@@ -167,6 +177,7 @@
               </button>
             </div>
             <div class="chat-context-panel" id="chat-context-panel" aria-label="Selected chat context" hidden></div>
+            <div class="chat-context-panel suggested-context-panel" id="chat-suggested-context" aria-label="Suggested chat context" hidden></div>
             <div class="input-row">
               <label class="sr-only" for="chat-text">Chat message</label>
               <textarea
@@ -246,13 +257,20 @@
           </section>
         </section>
 
-        <section class="tab-panel" data-tab-panel="mentors" aria-label="Mentors" hidden>
-          <section class="placeholder-view">
-            <article class="placeholder-card">
-              <p class="placeholder-kicker">Work in progress</p>
-              <h2>Persona-based thinking prompts will live here.</h2>
-              <p>Mentors will reuse the same retrieval system with different prompts and perspectives.</p>
-            </article>
+        <section class="tab-panel" data-tab-panel="sprint" aria-label="Sprint" hidden>
+          <section class="workspace-view sprint-view">
+            <div class="view-toolbar">
+              <p>Personal sprint and OKRs.</p>
+              <div class="toolbar-actions">
+                <button class="secondary-button" id="sprint-refresh-button" type="button">Refresh</button>
+              </div>
+            </div>
+            <div class="sprint-content" id="sprint-content">
+              <div class="empty-state">
+                <p class="empty-title">Sprint is waiting to load.</p>
+                <p>Open this tab to read the current sprint from the vault.</p>
+              </div>
+            </div>
           </section>
         </section>
 
@@ -276,6 +294,13 @@
               <section class="dashboard-section">
                 <h2>Recent captures</h2>
                 <div class="mini-list" id="dashboard-captures"></div>
+              </section>
+              <section class="dashboard-section">
+                <div class="section-heading-row">
+                  <h2>Monthly review</h2>
+                  <button class="secondary-button compact-button" id="monthly-review-button" type="button">Review</button>
+                </div>
+                <p class="quiet-line workflow-status" id="monthly-review-status">Create a draft review from this month's fleeting note.</p>
               </section>
               <section class="dashboard-section">
                 <h2>High focus</h2>
@@ -436,6 +461,16 @@
         <label class="edit-field" for="deep-work-goal">
           <span>Goal</span>
           <textarea id="deep-work-goal" rows="3" spellcheck="true" placeholder="What should this chat stay focused on?"></textarea>
+        </label>
+
+        <label class="edit-field" for="deep-work-recap" id="deep-work-recap-field">
+          <span>End recap</span>
+          <textarea id="deep-work-recap" rows="3" spellcheck="true" placeholder="Optional: what changed, what was decided, or what should carry forward?"></textarea>
+        </label>
+
+        <label class="checkbox-line" id="deep-work-capture-row">
+          <input type="checkbox" id="deep-work-capture-reflection" checked />
+          <span>Save recap as reflection capture</span>
         </label>
 
         <p class="quiet-line">While active, chat responses will bias toward this goal and avoid drifting unless you ask to change focus.</p>

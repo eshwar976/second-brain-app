@@ -27,6 +27,8 @@ const OPENCODE_SERVER_PASSWORD = process.env.OPENCODE_SERVER_PASSWORD || "";
 const OPENCODE_REGULAR_MODEL = process.env.OPENCODE_REGULAR_MODEL || process.env.OPENCODE_MODEL || "deepseek/deepseek-v4-flash";
 const OPENCODE_THINKING_MODEL = process.env.OPENCODE_THINKING_MODEL || "deepseek/deepseek-v4-pro";
 const OPENCODE_AGENT = process.env.OPENCODE_AGENT || "";
+const OPENCODE_FINAL_POLL_MS = Math.max(250, Number(process.env.OPENCODE_FINAL_POLL_MS || "900"));
+const OPENCODE_FINAL_TIMEOUT_MS = Math.max(5000, Number(process.env.OPENCODE_FINAL_TIMEOUT_MS || "90000"));
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
 const DEEPSEEK_REGULAR_MODEL = process.env.DEEPSEEK_REGULAR_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 const DEEPSEEK_THINKING_MODEL = process.env.DEEPSEEK_THINKING_MODEL || "deepseek-v4-pro";
@@ -34,10 +36,18 @@ const DEEPSEEK_BASE_URL = (process.env.DEEPSEEK_BASE_URL || "https://api.deepsee
 const DEEPSEEK_TRAINING_OPT_OUT = process.env.DEEPSEEK_TRAINING_OPT_OUT !== "false";
 const DEEPSEEK_DEFAULT_THINKING = process.env.DEEPSEEK_THINKING === "enabled" ? "enabled" : "disabled";
 const DEEPSEEK_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT === "max" ? "max" : "high";
+const TEST_AI_JSON = process.env.TEST_AI_JSON || "";
 const CHAT_CONTEXT_LIMIT = Math.min(Number(process.env.CHAT_CONTEXT_LIMIT || "6"), 12);
 const CHAT_HISTORY_LIMIT = Math.min(Number(process.env.CHAT_HISTORY_LIMIT || "8"), 16);
 const CHAT_SESSIONS_DIR = normalizeVaultRelativeDir(process.env.CHAT_SESSIONS_DIR || "3.Resources/gpt/sessions");
 const DEEP_WORK_SESSIONS_DIR = normalizeVaultRelativeDir(process.env.DEEP_WORK_SESSIONS_DIR || `${CHAT_SESSIONS_DIR}/deep-work`);
+const CHAT_NOTES_DIR = normalizeVaultRelativeDir(process.env.CHAT_NOTES_DIR || "3.Resources/gpt/notes");
+const FLEETING_REVIEWS_DIR = normalizeVaultRelativeDir(process.env.FLEETING_REVIEWS_DIR || "3.Resources/gpt/reviews/fleeting");
+const PERSONAL_OKR_ROOT = normalizeVaultRelativeDir(process.env.PERSONAL_OKR_ROOT || "2.Areas/Personal/OKRs");
+const PERSONAL_IDEA_LEDGER_PATH = normalizeVaultRelativeMarkdownPath(process.env.PERSONAL_IDEA_LEDGER_PATH || "2.Areas/Personal/Ideas/idea-ledger.md");
+const PERSONAL_SPRINT_STATE_PATH = process.env.PERSONAL_SPRINT_STATE_PATH
+  ? normalizeVaultRelativeMarkdownPath(process.env.PERSONAL_SPRINT_STATE_PATH)
+  : "";
 const INDEX_IGNORE_FILE = process.env.INDEX_IGNORE_FILE
   ? path.resolve(__dirname, process.env.INDEX_IGNORE_FILE)
   : path.join(__dirname, ".second-brain-ignore");
@@ -114,8 +124,28 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, await runVaultIndex());
     }
 
+    if (url.pathname === "/api/settings/ignore-rules" && req.method === "GET") {
+      return sendJson(res, 200, await getEditableIndexIgnoreRules());
+    }
+
+    if (url.pathname === "/api/settings/ignore-rules" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await updateEditableIndexIgnoreRules(body));
+    }
+
     if (url.pathname === "/api/dashboard" && req.method === "GET") {
       return sendJson(res, 200, await getDashboard());
+    }
+
+    if (url.pathname === "/api/personal-sprint" && req.method === "GET") {
+      return sendJson(res, 200, await getPersonalSprint(url.searchParams.get("view") || ""));
+    }
+
+    if (url.pathname === "/api/personal-sprint/checkbox" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await updatePersonalSprintCheckbox(body));
     }
 
     if (url.pathname === "/api/notes/search" && req.method === "GET") {
@@ -136,11 +166,41 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, await summarizeChatCapture(body));
     }
 
+    if (url.pathname === "/api/chat/capture" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await captureChatSummary(body));
+    }
+
+    if (url.pathname === "/api/chat/extract-todos" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await extractChatTodos(body));
+    }
+
+    if (url.pathname === "/api/chat/create-note" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await createStructuredChatNote(body));
+    }
+
+    if (url.pathname === "/api/reviews/monthly-fleeting" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await createMonthlyFleetingReview(body));
+    }
+
     if (url.pathname === "/api/chat/references" && req.method === "GET") {
       requireWriteAuth(req);
       const kind = url.searchParams.get("kind") || "";
       const query = url.searchParams.get("q") || "";
       return sendJson(res, 200, await getChatReferenceSuggestions(kind, query));
+    }
+
+    if (url.pathname === "/api/chat/context-suggestions" && req.method === "GET") {
+      requireWriteAuth(req);
+      const query = url.searchParams.get("q") || "";
+      return sendJson(res, 200, await getChatContextSuggestions(query));
     }
 
     if (url.pathname === "/api/chat/skills" && req.method === "GET") {
@@ -390,6 +450,44 @@ function getLanWarning() {
 async function getIndexIgnoreRulePreview() {
   await loadIndexIgnoreRules();
   return [...indexIgnoreRules];
+}
+
+async function getEditableIndexIgnoreRules() {
+  await loadIndexIgnoreRules();
+  return {
+    rules: [...indexIgnoreRules],
+    filePath: INDEX_IGNORE_FILE
+  };
+}
+
+async function updateEditableIndexIgnoreRules(body = {}) {
+  const rawRules = Array.isArray(body?.rules)
+    ? body.rules
+    : String(body?.rules || "").split(/\r?\n/);
+  const rules = [];
+  for (const rawRule of rawRules) {
+    const rule = normalizeEditableIgnoreRule(rawRule);
+    if (!rule) continue;
+    if (!rules.includes(rule)) rules.push(rule);
+  }
+
+  await fs.mkdir(path.dirname(INDEX_IGNORE_FILE), { recursive: true });
+  const markdown = [
+    "# Vault index ignore rules",
+    "# One vault-relative file or folder per line. Simple * wildcards are supported.",
+    ...rules
+  ].join("\n");
+  await fs.writeFile(INDEX_IGNORE_FILE, `${markdown}\n`, "utf8");
+  await loadIndexIgnoreRules();
+  scheduleVaultIndex("ignore-rules-updated", 100);
+  return await getEditableIndexIgnoreRules();
+}
+
+function normalizeEditableIgnoreRule(rule) {
+  const normalized = normalizeIgnoreRule(rule);
+  if (!normalized) return "";
+  if (normalized.includes("..")) throw httpError(400, "Ignore rules must be vault-relative paths.");
+  return normalized;
 }
 
 async function ensureIndexSchema() {
@@ -977,6 +1075,102 @@ async function summarizeChatCapture(body = {}) {
   };
 }
 
+async function captureChatSummary(body = {}) {
+  const { category, summary } = await summarizeChatCapture(body);
+  const capture = await appendCapture({
+    category,
+    text: summary,
+    source: body?.source || body?.sessionPath || ""
+  });
+  return {
+    category,
+    summary,
+    capture,
+    monthlyFile: getCurrentMonthlyCaptureFile()
+  };
+}
+
+async function extractChatTodos(body = {}) {
+  if (!isOpenCodeChatProvider() && !DEEPSEEK_API_KEY) {
+    throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable AI todo extraction.");
+  }
+  const text = normalizeCaptureSummaryInput(body?.text);
+  const source = body?.source || body?.sessionPath || "";
+  const extracted = isOpenCodeChatProvider()
+    ? await callOpenCodeTodoExtraction({ text })
+    : await callDeepSeekTodoExtraction({ text });
+  const todos = extracted.map(normalizeExtractedTodo).filter((todo) => todo.text);
+  const captures = [];
+  for (const todo of todos.slice(0, 12)) {
+    captures.push(await appendCapture({
+      category: "todo",
+      text: todo.text,
+      important: todo.important,
+      urgent: todo.urgent,
+      due: todo.due,
+      source
+    }));
+  }
+  if (captures.length) await runVaultIndex({ reason: "chat-todos" });
+  return {
+    todos: todos.slice(0, 12),
+    captures,
+    count: captures.length,
+    monthlyFile: getCurrentMonthlyCaptureFile()
+  };
+}
+
+async function createStructuredChatNote(body = {}) {
+  if (!isOpenCodeChatProvider() && !DEEPSEEK_API_KEY) {
+    throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable structured note generation.");
+  }
+  const text = normalizeCaptureSummaryInput(body?.text);
+  const source = normalizeCaptureSource(body?.source || body?.sessionPath);
+  const generated = isOpenCodeChatProvider()
+    ? await callOpenCodeStructuredNote({ text })
+    : await callDeepSeekStructuredNote({ text });
+  const note = normalizeStructuredNote(generated);
+  const relativePath = await writeStructuredChatNote({ note, source });
+  await runVaultIndex({ reason: "chat-note" });
+  return {
+    note: {
+      title: note.title,
+      path: relativePath,
+      summary: note.summary,
+      tags: note.tags
+    }
+  };
+}
+
+async function createMonthlyFleetingReview(body = {}) {
+  if (!isOpenCodeChatProvider() && !DEEPSEEK_API_KEY) {
+    throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable monthly fleeting reviews.");
+  }
+  const month = normalizeMonthInput(body?.month);
+  const filePath = path.join(getFleetingDir(), `${month}.md`);
+  const markdown = await readFileIfExists(filePath);
+  if (!markdown.trim()) {
+    throw httpError(404, `No fleeting entries found for ${month}.`);
+  }
+  const sourcePath = toVaultPath(filePath);
+  const generated = isOpenCodeChatProvider()
+    ? await callOpenCodeMonthlyFleetingReview({ month, markdown })
+    : await callDeepSeekMonthlyFleetingReview({ month, markdown });
+  const review = normalizeMonthlyFleetingReview(generated, { month });
+  const relativePath = await writeMonthlyFleetingReview({ review, month, sourcePath });
+  await runVaultIndex({ reason: "monthly-fleeting-review" });
+  return {
+    review: {
+      title: review.title,
+      path: relativePath,
+      month,
+      summary: review.summary,
+      source: sourcePath,
+      tags: review.tags
+    }
+  };
+}
+
 function normalizeCaptureSummaryCategory(value) {
   const category = String(value || "").trim().toLowerCase();
   if (category === "idea" || category === "reflection" || category === "thought" || category === "log") {
@@ -1192,7 +1386,7 @@ async function startDeepWorkSession(body = {}) {
     try {
       const filePath = resolveVaultRelativePath(existingPath);
       const markdown = await fs.readFile(filePath, "utf8");
-      const updated = updateFrontmatterField(
+      const updated = ensureDeepWorkSections(updateFrontmatterField(
         updateFrontmatterField(
           updateFrontmatterField(markdown, "goal", quoteYaml(goal)),
           "status",
@@ -1200,7 +1394,7 @@ async function startDeepWorkSession(body = {}) {
         ),
         "updated",
         now.toISOString()
-      );
+      ));
       await fs.writeFile(filePath, updated, "utf8");
       return {
         path: existingPath,
@@ -1232,7 +1426,19 @@ async function startDeepWorkSession(body = {}) {
     "## Goal",
     goal,
     "",
-    "## Conversation"
+    "## Context",
+    "",
+    "- Session started from the Second Brain web app.",
+    "",
+    "## Conversation",
+    "",
+    "## Decisions",
+    "",
+    "## Tasks",
+    "",
+    "- [ ] Review Deep Work outcomes",
+    "",
+    "## Recap"
   ].join("\n");
   await fs.writeFile(resolveVaultRelativePath(relativePath), `${markdown}\n`, "utf8");
   return {
@@ -1250,7 +1456,8 @@ async function stopDeepWorkSession(body = {}) {
   const now = new Date().toISOString();
   const filePath = resolveVaultRelativePath(sessionPath);
   const markdown = await fs.readFile(filePath, "utf8");
-  const updated = updateFrontmatterField(
+  const recap = normalizeDeepWorkRecap(body?.recap);
+  let updated = updateFrontmatterField(
     updateFrontmatterField(
       updateFrontmatterField(markdown, "status", "completed"),
       "ended",
@@ -1259,8 +1466,59 @@ async function stopDeepWorkSession(body = {}) {
     "updated",
     now
   );
+  updated = ensureDeepWorkSections(updated);
+  if (recap) {
+    updated = appendToMarkdownSection(updated, "Recap", [
+      `### ${formatTimestamp(new Date())}`,
+      "",
+      recap
+    ].join("\n"));
+  }
   await fs.writeFile(filePath, updated, "utf8");
-  return { stopped: true, path: sessionPath, status: "completed", updated: now };
+  let capture = null;
+  if (recap && body?.captureReflection) {
+    capture = await appendCapture({
+      category: "reflection",
+      text: `Deep Work recap: ${recap}`,
+      source: sessionPath
+    });
+  }
+  return { stopped: true, path: sessionPath, status: "completed", updated: now, capture };
+}
+
+function normalizeDeepWorkRecap(value) {
+  return String(value || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 4000);
+}
+
+function ensureDeepWorkSections(markdown) {
+  let next = markdown;
+  for (const heading of ["Context", "Conversation", "Decisions", "Tasks", "Recap"]) {
+    if (!new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*$`, "m").test(next)) {
+      next = `${next.trimEnd()}\n\n## ${heading}\n`;
+    }
+  }
+  return next;
+}
+
+function appendToMarkdownSection(markdown, heading, content) {
+  const cleanContent = String(content || "").trim();
+  if (!cleanContent) return markdown;
+  const ensured = ensureDeepWorkSections(markdown);
+  const lines = ensured.split(/\r?\n/);
+  const headingIndex = lines.findIndex((line) => line.trim() === `## ${heading}`);
+  if (headingIndex === -1) return `${ensured.trimEnd()}\n\n## ${heading}\n\n${cleanContent}\n`;
+  let insertIndex = lines.length;
+  for (let index = headingIndex + 1; index < lines.length; index += 1) {
+    if (/^##\s+/.test(lines[index])) {
+      insertIndex = index;
+      break;
+    }
+  }
+  const before = lines.slice(0, insertIndex).join("\n").trimEnd();
+  const after = lines.slice(insertIndex).join("\n").trimStart();
+  return after
+    ? `${before}\n\n${cleanContent}\n\n${after}\n`
+    : `${before}\n\n${cleanContent}\n`;
 }
 
 async function listOpenCodeSessions(limit = 20) {
@@ -1404,12 +1662,13 @@ async function callOpenCodeChatCompletion({ sessionId, message, thinkingMode, sk
   };
   if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
 
-  const result = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message`, {
+  await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message`, {
     method: "POST",
     body
   });
+  const finalAnswer = await waitForOpenCodeFinalAnswer(sessionId);
   return {
-    answer: extractOpenCodeText(result) || "OpenCode did not return a text response.",
+    answer: finalAnswer || "OpenCode did not return a text response.",
     model: `${modelRef.providerID}/${modelRef.modelID}`,
     thinkingMode
   };
@@ -1437,6 +1696,446 @@ async function callOpenCodeCaptureSummary({ category, text }) {
   const summary = normalizeAiCaptureSummary(extractOpenCodeText(result));
   if (!summary) throw httpError(502, "OpenCode did not return a capture summary.");
   return summary;
+}
+
+async function callOpenCodeTodoExtraction({ text }) {
+  const session = await createOpenCodeSession({ title: "Todo extraction" });
+  const modelRef = getOpenCodeModelRef("disabled");
+  await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
+    method: "POST",
+    body: {
+      model: modelRef,
+      parts: [{
+        type: "text",
+        text: buildTodoExtractionPrompt(text)
+      }]
+    }
+  });
+  const answer = await waitForOpenCodeFinalAnswer(session.id);
+  return parseTodoExtractionResponse(answer);
+}
+
+async function callOpenCodeStructuredNote({ text }) {
+  const session = await createOpenCodeSession({ title: "Structured note" });
+  const modelRef = getOpenCodeModelRef("disabled");
+  await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
+    method: "POST",
+    body: {
+      model: modelRef,
+      parts: [{
+        type: "text",
+        text: buildStructuredNotePrompt(text)
+      }]
+    }
+  });
+  const answer = await waitForOpenCodeFinalAnswer(session.id);
+  return parseStructuredNoteResponse(answer);
+}
+
+async function callOpenCodeMonthlyFleetingReview({ month, markdown }) {
+  if (TEST_AI_JSON) return parseStructuredNoteResponse(TEST_AI_JSON);
+  const session = await createOpenCodeSession({ title: `Fleeting review ${month}` });
+  const modelRef = getOpenCodeModelRef("disabled");
+  await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
+    method: "POST",
+    body: {
+      model: modelRef,
+      parts: [{
+        type: "text",
+        text: buildMonthlyFleetingReviewPrompt({ month, markdown })
+      }]
+    }
+  });
+  const answer = await waitForOpenCodeFinalAnswer(session.id);
+  return parseStructuredNoteResponse(answer);
+}
+
+async function callDeepSeekTodoExtraction({ text }) {
+  const endpoint = `${DEEPSEEK_BASE_URL}/chat/completions`;
+  const headers = {
+    "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+    "Content-Type": "application/json"
+  };
+  if (DEEPSEEK_TRAINING_OPT_OUT) {
+    headers.opt_out = "training";
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: DEEPSEEK_REGULAR_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: "Extract only concrete actionable todos from a chat transcript. Return valid JSON only."
+        },
+        {
+          role: "user",
+          content: buildTodoExtractionPrompt(text)
+        }
+      ],
+      thinking: { type: "disabled" }
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw httpError(response.status, data.error?.message || "DeepSeek todo extraction request failed.");
+  }
+
+  return parseTodoExtractionResponse(extractDeepSeekText(data));
+}
+
+async function callDeepSeekStructuredNote({ text }) {
+  const endpoint = `${DEEPSEEK_BASE_URL}/chat/completions`;
+  const headers = {
+    "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+    "Content-Type": "application/json"
+  };
+  if (DEEPSEEK_TRAINING_OPT_OUT) {
+    headers.opt_out = "training";
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: DEEPSEEK_REGULAR_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: "Convert a chat transcript into a structured Obsidian Markdown note. Return valid JSON only."
+        },
+        {
+          role: "user",
+          content: buildStructuredNotePrompt(text)
+        }
+      ],
+      thinking: { type: "disabled" }
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw httpError(response.status, data.error?.message || "DeepSeek structured note request failed.");
+  }
+
+  return parseStructuredNoteResponse(extractDeepSeekText(data));
+}
+
+async function callDeepSeekMonthlyFleetingReview({ month, markdown }) {
+  if (TEST_AI_JSON) return parseStructuredNoteResponse(TEST_AI_JSON);
+  const endpoint = `${DEEPSEEK_BASE_URL}/chat/completions`;
+  const headers = {
+    "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+    "Content-Type": "application/json"
+  };
+  if (DEEPSEEK_TRAINING_OPT_OUT) {
+    headers.opt_out = "training";
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model: DEEPSEEK_REGULAR_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: "Review a month of Obsidian fleeting notes. Return valid JSON only."
+        },
+        {
+          role: "user",
+          content: buildMonthlyFleetingReviewPrompt({ month, markdown })
+        }
+      ],
+      thinking: { type: "disabled" }
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw httpError(response.status, data.error?.message || "DeepSeek monthly review request failed.");
+  }
+
+  return parseStructuredNoteResponse(extractDeepSeekText(data));
+}
+
+function buildStructuredNotePrompt(text) {
+  return [
+    "Create a structured Obsidian Markdown note from this chat transcript.",
+    "Return JSON only with this exact shape:",
+    "{\"title\":\"clear note title\",\"summary\":\"one sentence summary\",\"tags\":[\"gpt/generated\"],\"body\":\"markdown body without YAML frontmatter\"}",
+    "Rules:",
+    "- The body must be useful as a standalone draft note.",
+    "- Include sections such as Context, Key points, Decisions, Open questions, or Next steps only when useful.",
+    "- Use Obsidian-friendly Markdown.",
+    "- Do not claim files were changed.",
+    "- Do not include YAML frontmatter in body.",
+    "- Keep the note concise but not shallow.",
+    "",
+    "Chat transcript:",
+    clipText(text, 12000)
+  ].join("\n");
+}
+
+function buildMonthlyFleetingReviewPrompt({ month, markdown }) {
+  return [
+    `Review this Obsidian monthly fleeting note for ${month}.`,
+    "Return JSON only with this exact shape:",
+    "{\"title\":\"Fleeting Review — YYYY-MM\",\"summary\":\"one sentence summary\",\"tags\":[\"gpt/review\",\"fleeting\"],\"body\":\"markdown body without YAML frontmatter\"}",
+    "Rules:",
+    "- Preserve the user's voice and intent; do not over-polish into corporate language.",
+    "- Identify recurring themes, decisions, open loops, todos, people, domains, and activity patterns when present.",
+    "- Surface 3-7 useful next actions or review questions.",
+    "- Mention uncertainty when the notes are sparse or ambiguous.",
+    "- Do not modify or rewrite the raw log.",
+    "- Do not include YAML frontmatter in body.",
+    "- Keep the body concise enough to review in one sitting.",
+    "",
+    "Monthly fleeting Markdown:",
+    clipText(markdown, 18000)
+  ].join("\n");
+}
+
+function buildTodoExtractionPrompt(text) {
+  return [
+    "Extract concrete todos from this chat transcript.",
+    "Return JSON only, with this exact shape:",
+    "{\"todos\":[{\"text\":\"short actionable task\",\"important\":true,\"urgent\":false,\"due\":\"YYYY-MM-DD or empty\"}]}",
+    "Rules:",
+    "- Include only explicit or clearly implied actions the user may want to do.",
+    "- Do not include vague ideas, summaries, or completed work.",
+    "- Keep task text concise and imperative.",
+    "- Use important/urgent only when the transcript gives a clear signal; otherwise false.",
+    "- Use due only when an explicit date or deadline is present; otherwise empty string.",
+    "- If there are no todos, return {\"todos\":[]}.",
+    "",
+    "Chat transcript:",
+    clipText(text, 10000)
+  ].join("\n");
+}
+
+function parseTodoExtractionResponse(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+  const jsonText = extractJsonFromText(raw);
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    throw httpError(502, "AI todo extraction did not return valid JSON.");
+  }
+  const todos = Array.isArray(parsed) ? parsed : parsed?.todos;
+  if (!Array.isArray(todos)) throw httpError(502, "AI todo extraction did not return a todos array.");
+  return todos;
+}
+
+function parseStructuredNoteResponse(value) {
+  const raw = String(value || "").trim();
+  if (!raw) throw httpError(502, "AI structured note generation returned empty output.");
+  let parsed;
+  try {
+    parsed = JSON.parse(extractJsonFromText(raw));
+  } catch {
+    throw httpError(502, "AI structured note generation did not return valid JSON.");
+  }
+  return parsed;
+}
+
+function extractJsonFromText(value) {
+  const text = String(value || "").trim();
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) return fenced[1].trim();
+  const arrayStart = text.indexOf("[");
+  const objectStart = text.indexOf("{");
+  const starts = [arrayStart, objectStart].filter((index) => index >= 0).sort((a, b) => a - b);
+  if (!starts.length) return text;
+  const start = starts[0];
+  const endChar = text[start] === "[" ? "]" : "}";
+  const end = text.lastIndexOf(endChar);
+  return end >= start ? text.slice(start, end + 1).trim() : text.slice(start).trim();
+}
+
+function normalizeExtractedTodo(todo) {
+  const text = normalizeExtractedTodoText(typeof todo === "string" ? todo : todo?.text || todo?.task || todo?.title);
+  return {
+    text,
+    important: parseBooleanInput(todo?.important),
+    urgent: parseBooleanInput(todo?.urgent),
+    due: normalizeExtractedTodoDue(todo?.due || todo?.deadline)
+  };
+}
+
+function normalizeExtractedTodoText(value) {
+  return String(value || "")
+    .replace(/^[-*]\s+/, "")
+    .replace(/^\[[ xX]\]\s+/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 280);
+}
+
+function normalizeExtractedTodoDue(value) {
+  const due = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : "";
+}
+
+function normalizeStructuredNote(note = {}) {
+  const title = normalizeStructuredNoteTitle(note.title);
+  const summary = String(note.summary || "").replace(/\s+/g, " ").trim().slice(0, 500);
+  const tags = normalizeStructuredNoteTags(note.tags);
+  const body = normalizeStructuredNoteBody(note.body || note.markdown || note.content, { title, summary });
+  return { title, summary, tags, body };
+}
+
+function normalizeStructuredNoteTitle(value) {
+  const title = String(value || "")
+    .replace(/^#+\s+/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  return title || "Generated chat note";
+}
+
+function normalizeStructuredNoteTags(tags) {
+  const values = Array.isArray(tags) ? tags : String(tags || "").split(/[,\s]+/);
+  const normalized = values
+    .map((tag) => String(tag || "").trim().replace(/^#/, ""))
+    .filter(Boolean)
+    .map((tag) => tag.toLowerCase().replace(/[^a-z0-9/_-]+/g, "-").replace(/^-+|-+$/g, ""))
+    .filter(Boolean);
+  return Array.from(new Set(["gpt/generated", ...normalized])).slice(0, 8);
+}
+
+function normalizeStructuredNoteBody(value, { title, summary }) {
+  const body = String(value || "").replace(/\r\n/g, "\n").trim();
+  const cleanBody = body
+    .replace(/^---[\s\S]*?---\s*/, "")
+    .replace(new RegExp(`^#\\s+${escapeRegExp(title)}\\s*`, "i"), "")
+    .trim();
+  const sections = [];
+  if (summary) sections.push(`> [!summary]\n> ${summary}`);
+  sections.push(cleanBody || "## Notes\n\n- ");
+  return sections.join("\n\n").trim();
+}
+
+async function writeStructuredChatNote({ note, source }) {
+  const now = new Date();
+  const slug = slugifyLookup(note.title).slice(0, 64) || "chat-note";
+  const relativePath = await getUniqueStructuredNotePath(`${formatDate(now)}-${slug}.md`);
+  const sourceLine = source ? `source: ${quoteYaml(source)}` : "";
+  const markdown = [
+    "---",
+    `title: ${quoteYaml(note.title)}`,
+    "type: generated-note",
+    `created: ${quoteYaml(now.toISOString())}`,
+    "status: draft",
+    ...(sourceLine ? [sourceLine] : []),
+    "tags:",
+    ...note.tags.map((tag) => `  - ${tag}`),
+    "---",
+    "",
+    `# ${note.title}`,
+    "",
+    note.body,
+    "",
+    ...(source ? ["---", `Source: ${formatStructuredNoteSource(source)}`] : [])
+  ].join("\n");
+
+  const filePath = resolveVaultRelativePath(relativePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${markdown.trimEnd()}\n`, "utf8");
+  return relativePath;
+}
+
+async function getUniqueStructuredNotePath(fileName) {
+  const baseSlug = path.basename(fileName, ".md");
+  for (let index = 0; index < 100; index += 1) {
+    const suffix = index ? `-${index + 1}` : "";
+    const candidate = `${CHAT_NOTES_DIR}/${baseSlug}${suffix}.md`;
+    try {
+      await fs.access(resolveVaultRelativePath(candidate));
+    } catch (error) {
+      if (error.code === "ENOENT") return candidate;
+      throw error;
+    }
+  }
+  throw httpError(500, "Could not create a unique structured note path.");
+}
+
+function formatStructuredNoteSource(source) {
+  if (!source) return "";
+  return source.startsWith("opencode:") ? source : `[[${source}]]`;
+}
+
+function normalizeMonthlyFleetingReview(note = {}, { month }) {
+  const title = normalizeStructuredNoteTitle(note.title || `Fleeting Review — ${month}`);
+  const summary = String(note.summary || "").replace(/\s+/g, " ").trim().slice(0, 500);
+  const tags = normalizeTagList(["gpt/review", "fleeting", ...(Array.isArray(note.tags) ? note.tags : [])]);
+  const body = normalizeStructuredNoteBody(note.body || note.markdown || note.content, { title, summary });
+  return { title, summary, tags, body };
+}
+
+function normalizeTagList(tags) {
+  const values = Array.isArray(tags) ? tags : String(tags || "").split(/[,\s]+/);
+  const normalized = values
+    .map((tag) => String(tag || "").trim().replace(/^#/, ""))
+    .filter(Boolean)
+    .map((tag) => tag.toLowerCase().replace(/[^a-z0-9/_-]+/g, "-").replace(/^-+|-+$/g, ""))
+    .filter(Boolean);
+  return Array.from(new Set(normalized)).slice(0, 8);
+}
+
+async function writeMonthlyFleetingReview({ review, month, sourcePath }) {
+  const now = new Date();
+  const relativePath = await getUniqueMonthlyFleetingReviewPath(`${month}-fleeting-review.md`);
+  const markdown = [
+    "---",
+    `title: ${quoteYaml(review.title)}`,
+    "type: monthly-fleeting-review",
+    `month: ${quoteYaml(month)}`,
+    `created: ${quoteYaml(now.toISOString())}`,
+    "status: draft",
+    `source: ${quoteYaml(sourcePath)}`,
+    "tags:",
+    ...review.tags.map((tag) => `  - ${tag}`),
+    "---",
+    "",
+    `# ${review.title}`,
+    "",
+    review.body,
+    "",
+    "---",
+    `Source: [[${sourcePath}]]`
+  ].join("\n");
+
+  const filePath = resolveVaultRelativePath(relativePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${markdown.trimEnd()}\n`, "utf8");
+  return relativePath;
+}
+
+async function getUniqueMonthlyFleetingReviewPath(fileName) {
+  const baseSlug = path.basename(fileName, ".md");
+  for (let index = 0; index < 100; index += 1) {
+    const suffix = index ? `-${index + 1}` : "";
+    const candidate = `${FLEETING_REVIEWS_DIR}/${baseSlug}${suffix}.md`;
+    try {
+      await fs.access(resolveVaultRelativePath(candidate));
+    } catch (error) {
+      if (error.code === "ENOENT") return candidate;
+      throw error;
+    }
+  }
+  throw httpError(500, "Could not create a unique monthly review path.");
+}
+
+function normalizeMonthInput(value) {
+  const month = String(value || getCurrentMonthSlug()).trim();
+  if (!/^\d{4}-\d{2}$/.test(month)) throw httpError(400, "Month must use YYYY-MM.");
+  return month;
 }
 
 function buildOpenCodePrompt({ message, skill, people, files, deepWork }) {
@@ -1483,6 +2182,23 @@ function buildOpenCodePrompt({ message, skill, people, files, deepWork }) {
   ].join("\n");
 }
 
+async function waitForOpenCodeFinalAnswer(sessionId) {
+  const startedAt = Date.now();
+  let lastError = null;
+  while (Date.now() - startedAt <= OPENCODE_FINAL_TIMEOUT_MS) {
+    try {
+      const messages = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message`);
+      const finalAnswer = extractLatestOpenCodeFinalAnswer(messages);
+      if (finalAnswer) return finalAnswer;
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(OPENCODE_FINAL_POLL_MS);
+  }
+  if (lastError) throw lastError;
+  throw httpError(504, "OpenCode response timed out before a completed answer was available.");
+}
+
 function getOpenCodeMessageRole(item = {}) {
   const role = String(item.info?.role || item.info?.type || item.role || item.type || "").toLowerCase();
   return role.includes("assistant") ? "assistant" : "user";
@@ -1491,11 +2207,40 @@ function getOpenCodeMessageRole(item = {}) {
 function extractOpenCodeText(item = {}) {
   const parts = Array.isArray(item.parts) ? item.parts : [];
   return parts
-    .filter((part) => String(part.type || "").toLowerCase() === "text")
+    .filter((part) => isDisplayableOpenCodeTextPart(part))
     .map((part) => part.text || part.content || "")
     .filter(Boolean)
     .join("\n")
     .trim();
+}
+
+function extractLatestOpenCodeFinalAnswer(messages) {
+  if (!Array.isArray(messages)) return "";
+  for (const message of messages.slice().reverse()) {
+    if (getOpenCodeMessageRole(message) !== "assistant") continue;
+    if (!isCompletedOpenCodeFinalMessage(message)) continue;
+    const content = extractOpenCodeText(message);
+    if (content) return content;
+  }
+  return "";
+}
+
+function isCompletedOpenCodeFinalMessage(message = {}) {
+  const finish = String(message.info?.finish || message.finish || "").toLowerCase();
+  if (finish && !["stop", "end_turn", "complete", "completed"].includes(finish)) return false;
+  const completedAt = message.info?.time?.completed || message.time?.completed || message.completed;
+  return Boolean(completedAt || finish === "stop");
+}
+
+function isDisplayableOpenCodeTextPart(part = {}) {
+  const type = String(part.type || "").toLowerCase();
+  if (type !== "text") return false;
+  const label = String(part.name || part.kind || part.role || part.label || "").toLowerCase();
+  return !/(reason|thought|thinking)/.test(label);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function openCodeFetch(endpoint, { method = "GET", body = null } = {}) {
@@ -1587,7 +2332,7 @@ async function appendDeepWorkExchange({ deepWork, chatSession, message, response
     response.answer.trim()
   ].join("\n");
   const updated = updateFrontmatterField(markdown, "updated", now.toISOString());
-  await fs.writeFile(filePath, `${updated.trimEnd()}\n\n${entry}\n`, "utf8");
+  await fs.writeFile(filePath, appendToMarkdownSection(updated, "Conversation", entry), "utf8");
 }
 
 function parseChatSessionMessages(markdown) {
@@ -1884,17 +2629,129 @@ async function getChatReferenceSuggestions(kind, query) {
   const rows = await getReferenceRows(normalizedKind);
   const suggestions = rows
     .filter((row) => matchesSuggestionQuery(row, cleanQuery))
-    .sort((a, b) => suggestionSortValue(a).localeCompare(suggestionSortValue(b)))
+    .map((row) => ({ row, score: scoreReferenceSuggestion(row, cleanQuery) }))
+    .sort((a, b) => b.score - a.score || suggestionSortValue(a.row).localeCompare(suggestionSortValue(b.row)))
     .slice(0, 10)
-    .map((row) => ({
+    .map(({ row, score }) => ({
       id: row.note_id,
       kind: normalizedKind,
       title: row.title,
       name: row.name || row.title,
       token: slugifyLookup(row.name || row.title || path.basename(row.path || "", ".md")),
-      path: row.path
+      path: row.path,
+      score
     }));
   return { kind: normalizedKind, query: cleanQuery, suggestions };
+}
+
+async function getChatContextSuggestions(query = "") {
+  await ensureIndexSchema();
+  const terms = extractContextSuggestionTerms(query);
+  if (!terms.length) return { query: "", suggestions: [] };
+  const groups = await Promise.all(terms.flatMap((term) => [
+    getChatSkills(term),
+    getChatReferenceSuggestions("people", term),
+    getVaultFileSuggestions(term)
+  ]));
+  const suggestions = mergeContextSuggestions(groups.flatMap((group) => (
+    normalizeContextSuggestionGroup(group.suggestions, group.kind)
+  )))
+    .map((item) => ({
+      ...item,
+      score: scoreContextSuggestion(item, terms)
+    }))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || suggestionSortValue(a).localeCompare(suggestionSortValue(b)))
+    .slice(0, 8);
+  return { query: terms.join(" "), suggestions };
+}
+
+function extractContextSuggestionTerms(query) {
+  return extractSearchTerms(
+    String(query || "")
+      .replace(/(?:^|\s)[#/@][A-Za-z0-9_-]*/g, " ")
+      .replace(/\[\[[^\]]+]]/g, " ")
+  ).slice(0, 5);
+}
+
+function normalizeContextSuggestionGroup(items = [], fallbackKind) {
+  return items
+    .filter((item) => !(fallbackKind === "file" && isSkillMarkdownPath(item.path)))
+    .map((item) => ({
+      id: item.id,
+      kind: item.kind || fallbackKind,
+      title: item.title || item.name || item.token || item.path || "Context",
+      name: item.name || item.title || item.token || "",
+      token: item.token || slugifyLookup(item.name || item.title || item.path || ""),
+      path: item.path || "",
+      type: item.type || null,
+      score: Number(item.score || 0)
+    }));
+}
+
+function mergeContextSuggestions(items = []) {
+  const merged = new Map();
+  for (const item of items) {
+    const key = (item.path || `${item.kind}:${item.token || item.name || item.title}`).toLowerCase();
+    if (!key) continue;
+    const existing = merged.get(key);
+    if (!existing || Number(item.score || 0) > Number(existing.score || 0)) {
+      merged.set(key, item);
+    }
+  }
+  return Array.from(merged.values());
+}
+
+function scoreContextSuggestion(item, terms = []) {
+  const fields = getSuggestionSearchFields(item).map((value) => slugifyLookup(value)).filter(Boolean);
+  const pathText = slugifyLookup(item.path || "");
+  let score = getContextKindBoost(item.kind) + Math.min(Number(item.score || 0) / 10, 18);
+  let matchedTerms = 0;
+
+  for (const term of terms) {
+    const variants = getContextTermVariants(term);
+    const termScore = variants.reduce((best, variant) => {
+      if (!variant) return best;
+      const fieldScore = fields.reduce((fieldBest, field, index) => {
+        if (field === variant) return Math.max(fieldBest, 90 - index);
+        if (field.startsWith(variant)) return Math.max(fieldBest, 65 - index);
+        if (field.includes(variant)) return Math.max(fieldBest, 42 - index);
+        if (variant.includes(field) && field.length > 4) return Math.max(fieldBest, 34 - index);
+        return fieldBest;
+      }, 0);
+      const pathScore = pathText.includes(variant) ? 26 : 0;
+      return Math.max(best, fieldScore, pathScore);
+    }, 0);
+    if (termScore > 0) matchedTerms += 1;
+    score += termScore;
+  }
+
+  if (matchedTerms > 1) score += matchedTerms * 70;
+  if (matchedTerms === terms.length) score += 90;
+  if (item.kind === "file" && isOkrPromptTerms(terms) && /(?:^|\/)okrs?(?:\/|$)/i.test(item.path || "")) score += 120;
+  if (item.kind === "file" && terms.includes("personal") && /(?:^|\/)personal(?:\/|$)/i.test(item.path || "")) score += 45;
+  if (item.kind === "skill" && isOkrPromptTerms(terms) && !fields.some((field) => field.includes("okr"))) score -= 80;
+  return Math.max(0, score);
+}
+
+function getContextTermVariants(term) {
+  const clean = slugifyLookup(term);
+  const variants = new Set([clean]);
+  if (clean.endsWith("s") && clean.length > 3) variants.add(clean.slice(0, -1));
+  if (clean === "okr") variants.add("okrs");
+  if (clean === "okrs") variants.add("okr");
+  return Array.from(variants);
+}
+
+function isOkrPromptTerms(terms = []) {
+  return terms.some((term) => term === "okr" || term === "okrs");
+}
+
+function getContextKindBoost(kind) {
+  if (kind === "file") return 18;
+  if (kind === "people") return 8;
+  if (kind === "skill") return 4;
+  return 0;
 }
 
 async function getReferenceRows(kind) {
@@ -1936,15 +2793,17 @@ async function getChatSkills(query = "") {
   );
   const suggestions = rows
     .filter((row) => matchesSuggestionQuery(row, cleanQuery))
-    .sort((a, b) => suggestionSortValue(a).localeCompare(suggestionSortValue(b)))
-    .map((row) => ({
+    .map((row) => ({ row, score: scoreReferenceSuggestion(row, cleanQuery) }))
+    .sort((a, b) => b.score - a.score || suggestionSortValue(a.row).localeCompare(suggestionSortValue(b.row)))
+    .map(({ row, score }) => ({
       id: row.note_id || row.id || row.name || row.title,
       kind: "skill",
       title: row.title,
       name: row.name || row.title,
       token: slugifyLookup(row.name || row.title || path.basename(row.path || "", ".md")),
       path: row.path || "",
-      type: row.type || null
+      type: row.type || null,
+      score
     }));
   return { kind: "skill", query: cleanQuery, suggestions };
 }
@@ -2034,15 +2893,17 @@ async function getVaultFileSuggestions(query = "") {
   `);
   const suggestions = rows
     .filter((row) => matchesSuggestionQuery(row, cleanQuery))
-    .sort((a, b) => suggestionSortValue(a).localeCompare(suggestionSortValue(b)))
+    .map((row) => ({ row, score: scoreReferenceSuggestion(row, cleanQuery) }))
+    .sort((a, b) => b.score - a.score || suggestionSortValue(a.row).localeCompare(suggestionSortValue(b.row)))
     .slice(0, 20)
-    .map((row) => ({
+    .map(({ row, score }) => ({
       id: row.note_id,
       kind: "file",
       title: row.title,
       name: row.title,
       token: slugifyLookup(row.title || path.basename(row.path || "", ".md")),
-      path: row.path
+      path: row.path,
+      score
     }));
   return { kind: "file", query: cleanQuery, suggestions };
 }
@@ -2126,12 +2987,36 @@ function normalizeReferenceKind(kind) {
 
 function matchesSuggestionQuery(row, query) {
   if (!query) return true;
+  return getSuggestionSearchFields(row).some((value) => slugifyLookup(value).includes(query));
+}
+
+function scoreReferenceSuggestion(row, query) {
+  if (!query) return getRecencySuggestionScore(row);
+  const fields = getSuggestionSearchFields(row).map((value) => slugifyLookup(value)).filter(Boolean);
+  return fields.reduce((score, field, index) => {
+    if (field === query) return score + 100 - index;
+    if (field.startsWith(query)) return score + 70 - index;
+    if (field.includes(query)) return score + 35 - index;
+    return score;
+  }, getRecencySuggestionScore(row));
+}
+
+function getSuggestionSearchFields(row) {
   return [
     row.name,
     row.title,
     path.basename(row.path || "", ".md"),
-    skillFolderName(row.path || "")
-  ].some((value) => slugifyLookup(value).includes(query));
+    skillFolderName(row.path || ""),
+    row.description,
+    row.path
+  ];
+}
+
+function getRecencySuggestionScore(row) {
+  const updatedMs = Date.parse(row.updated || "");
+  if (!Number.isFinite(updatedMs)) return 0;
+  const ageDays = Math.max(0, (Date.now() - updatedMs) / 86400000);
+  return Math.max(0, 10 - Math.min(ageDays, 10));
 }
 
 function suggestionSortValue(row) {
@@ -2474,6 +3359,590 @@ async function getDashboard() {
     dueSoonTasks: dueSoonTasks.tasks,
     triageTasks: triageTasks.tasks
   };
+}
+
+async function getPersonalSprint(view = "") {
+  const selectedSprint = await resolvePersonalSprintStatePath(view);
+  const sprintMarkdown = await readVaultMarkdownFile(selectedSprint.path, "No active sprint — run personal sprint planning.");
+  const { frontmatter: sprintFrontmatter } = splitFrontmatter(sprintMarkdown);
+  const sprintMeta = parseSprintFrontmatter(sprintFrontmatter);
+  if (!sprintMeta.okrFile) throw httpError(404, "OKR file not found in sprint-state frontmatter.");
+  const okrPath = normalizeVaultRelativeMarkdownPath(sprintMeta.okrFile);
+
+  const okrMarkdown = await readVaultMarkdownFile(okrPath, `OKR file not found: ${okrPath}`);
+  const { frontmatter: okrFrontmatter } = splitFrontmatter(okrMarkdown);
+  const okrMeta = parseOkrFrontmatter(okrFrontmatter);
+  const activities = Array.from(new Set([
+    sprintMeta.activeKrActivity,
+    ...okrMeta.keyResults.map((kr) => kr.activity)
+  ].filter(Boolean)));
+  const activityCounts = await countSprintActivities({
+    activities,
+    sprintStart: sprintMeta.sprintStart,
+    sprintEnd: sprintMeta.sprintEnd
+  });
+  const today = formatDate(new Date());
+  const currentWeekStart = getIsoWeekStart(today);
+  const currentWeekEnd = addDaysToIsoDate(currentWeekStart, 6);
+  const isStale = Boolean(sprintMeta.sprintEnd && today > sprintMeta.sprintEnd);
+  const activeKr = okrMeta.keyResults.find((kr) => kr.id === sprintMeta.activeKr) || null;
+  const focus = await getPersonalFocusIdea();
+
+  return {
+    sprint: {
+      path: selectedSprint.path,
+      view: selectedSprint.view,
+      selection: selectedSprint.selection,
+      candidateCount: selectedSprint.candidateCount,
+      availableViews: selectedSprint.availableViews,
+      title: sprintMeta.title || "Personal Sprint",
+      quarter: sprintMeta.quarter || okrMeta.quarter || "",
+      start: sprintMeta.sprintStart,
+      end: sprintMeta.sprintEnd,
+      activeKr: sprintMeta.activeKr,
+      activeKrDescription: sprintMeta.activeKrDescription,
+      activeKrType: sprintMeta.activeKrType,
+      activeKrActivity: sprintMeta.activeKrActivity,
+      activeActivityCount: activityCounts[sprintMeta.activeKrActivity]?.sprintCount || 0,
+      review: buildSprintReview({ sprintMeta, activeKr, activityCounts, today }),
+      preview: buildSprintPreview({ sprintMeta, today }),
+      isCurrent: Boolean(sprintMeta.sprintStart && sprintMeta.sprintEnd && today >= sprintMeta.sprintStart && today <= sprintMeta.sprintEnd),
+      isStale,
+      staleMessage: isStale ? `Sprint ended ${sprintMeta.sprintEnd}. Run personal sprint planning.` : "",
+      currentWeekStart,
+      currentWeekEnd,
+      weeklyCheckboxes: sprintMeta.weeklyCheckboxes.map((item) => ({
+        ...item,
+        isCurrentWeek: Boolean(item.week && item.week >= currentWeekStart && item.week <= currentWeekEnd)
+      })),
+      okrFile: okrPath
+    },
+    okr: {
+      path: okrPath,
+      title: okrMeta.title || "Personal OKRs",
+      quarter: okrMeta.quarter || sprintMeta.quarter || "",
+      status: okrMeta.status || "",
+      objectives: groupPersonalOkrObjectives({
+        keyResults: okrMeta.keyResults,
+        activeKr: sprintMeta.activeKr,
+        activityCounts
+      })
+    },
+    focus
+  };
+}
+
+async function updatePersonalSprintCheckbox(body = {}) {
+  const week = normalizeIsoDate(body?.week);
+  if (!week) throw httpError(400, "Week is required.");
+  const done = Boolean(body?.done);
+  const selectedSprint = await resolvePersonalSprintStatePath(body?.view || "");
+  const filePath = resolveVaultRelativePath(selectedSprint.path);
+  const markdown = await fs.readFile(filePath, "utf8");
+  const { frontmatter, body: markdownBody } = splitFrontmatter(markdown);
+  const sprintMeta = parseSprintFrontmatter(frontmatter);
+  if (!sprintMeta.weeklyCheckboxes.some((item) => item.week === week)) {
+    throw httpError(404, "Sprint checkbox week was not found.");
+  }
+  const nextFrontmatter = updateWeeklyCheckboxesFrontmatter(frontmatter, week, done);
+  await fs.writeFile(filePath, `---\n${nextFrontmatter.trimEnd()}\n---\n${markdownBody}`, "utf8");
+  return await getPersonalSprint(selectedSprint.view);
+}
+
+async function resolvePersonalSprintStatePath(view = "") {
+  if (PERSONAL_SPRINT_STATE_PATH) {
+    return {
+      path: PERSONAL_SPRINT_STATE_PATH,
+      view: "current",
+      selection: "configured",
+      candidateCount: 1,
+      availableViews: [{ view: "current", label: "Current", path: PERSONAL_SPRINT_STATE_PATH }]
+    };
+  }
+
+  const today = formatDate(new Date());
+  const candidates = await discoverPersonalSprintStateFiles();
+  if (!candidates.length) {
+    throw httpError(404, `No personal sprint files found under ${PERSONAL_OKR_ROOT}.`);
+  }
+
+  const active = candidates
+    .filter((candidate) => candidate.meta.sprintStart && candidate.meta.sprintEnd && today >= candidate.meta.sprintStart && today <= candidate.meta.sprintEnd)
+    .sort((a, b) => compareIsoDesc(a.meta.sprintStart, b.meta.sprintStart))[0];
+
+  const upcoming = candidates
+    .filter((candidate) => candidate.meta.sprintStart && candidate.meta.sprintStart > today)
+    .sort((a, b) => compareIsoAsc(a.meta.sprintStart, b.meta.sprintStart))[0];
+
+  const recent = candidates
+    .filter((candidate) => candidate.meta.sprintEnd && candidate.meta.sprintEnd < today)
+    .sort((a, b) => compareIsoDesc(a.meta.sprintEnd, b.meta.sprintEnd))[0];
+
+  const slots = {
+    last: recent ? { ...recent, view: "last", selection: "last-by-date" } : null,
+    current: active ? { ...active, view: "current", selection: "active-by-date" } : null,
+    next: upcoming ? { ...upcoming, view: "next", selection: "next-by-date" } : null
+  };
+  const availableViews = [
+    slots.last ? buildSprintViewSummary(slots.last, "Last") : null,
+    slots.current ? buildSprintViewSummary(slots.current, "Current") : null,
+    slots.next ? buildSprintViewSummary(slots.next, "Next") : null
+  ].filter(Boolean);
+  const requestedView = ["last", "current", "next"].includes(String(view || "")) ? String(view) : "";
+  const selected = (requestedView && slots[requestedView])
+    || slots.current
+    || slots.next
+    || slots.last;
+
+  if (selected) {
+    return {
+      ...selected,
+      candidateCount: candidates.length,
+      availableViews
+    };
+  }
+
+  const fallback = candidates.sort((a, b) => b.updatedMs - a.updatedMs)[0];
+  return {
+    ...fallback,
+    view: "current",
+    selection: "latest-file",
+    candidateCount: candidates.length,
+    availableViews: [buildSprintViewSummary({ ...fallback, view: "current" }, "Current")]
+  };
+}
+
+function buildSprintViewSummary(candidate, label) {
+  return {
+    view: candidate.view,
+    label,
+    path: candidate.path,
+    start: candidate.meta.sprintStart,
+    end: candidate.meta.sprintEnd,
+    quarter: candidate.meta.quarter,
+    activeKr: candidate.meta.activeKr
+  };
+}
+
+async function discoverPersonalSprintStateFiles() {
+  const root = resolveVaultRelativePath(PERSONAL_OKR_ROOT);
+  const files = [];
+  await collectPersonalSprintMarkdownFiles(root, files);
+  const candidates = [];
+
+  for (const filePath of files) {
+    const markdown = await fs.readFile(filePath, "utf8");
+    const stat = await fs.stat(filePath);
+    const { frontmatter } = splitFrontmatter(markdown);
+    const meta = parseSprintFrontmatter(frontmatter);
+    if (!meta.okrFile && !meta.sprintStart && !meta.sprintEnd) continue;
+    candidates.push({
+      path: toVaultPath(filePath),
+      meta,
+      updatedMs: stat.mtimeMs
+    });
+  }
+
+  return candidates;
+}
+
+async function collectPersonalSprintMarkdownFiles(dirPath, files) {
+  let entries = [];
+  try {
+    entries = await fs.readdir(dirPath, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      await collectPersonalSprintMarkdownFiles(fullPath, files);
+      continue;
+    }
+    if (entry.isFile() && isPersonalSprintMarkdownName(entry.name)) {
+      files.push(fullPath);
+    }
+  }
+}
+
+function isPersonalSprintMarkdownName(fileName) {
+  return /^sprint-\d{4}-\d{2}-\d{2}\.md$/i.test(fileName)
+    || /^sprint-state.*\.md$/i.test(fileName);
+}
+
+function compareIsoAsc(left, right) {
+  return String(left || "").localeCompare(String(right || ""));
+}
+
+function compareIsoDesc(left, right) {
+  return compareIsoAsc(right, left);
+}
+
+async function readVaultMarkdownFile(relativePath, notFoundMessage) {
+  try {
+    return await fs.readFile(resolveVaultRelativePath(relativePath), "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") throw httpError(404, notFoundMessage);
+    throw error;
+  }
+}
+
+function parseSprintFrontmatter(frontmatter) {
+  const scalar = parseFrontmatter(frontmatter);
+  return {
+    title: scalar.title || "",
+    quarter: scalar.quarter || "",
+    sprintStart: normalizeIsoDate(scalar["sprint-start"]),
+    sprintEnd: normalizeIsoDate(scalar["sprint-end"]),
+    activeKr: scalar["active-kr"] || "",
+    activeKrDescription: scalar["active-kr-description"] || "",
+    activeKrType: scalar["active-kr-type"] || "",
+    activeKrActivity: scalar["active-kr-activity"] || "",
+    okrFile: scalar["okr-file"] || "",
+    weeklyCheckboxes: parseYamlObjectArray(frontmatter, "weekly-checkboxes").map((item) => ({
+      week: normalizeIsoDate(item.week),
+      label: item.label || `Week of ${normalizeIsoDate(item.week)}`,
+      done: parseYamlBoolean(item.done)
+    })).filter((item) => item.week)
+  };
+}
+
+function parseOkrFrontmatter(frontmatter) {
+  const scalar = parseFrontmatter(frontmatter);
+  return {
+    title: scalar.title || "",
+    quarter: scalar.quarter || "",
+    status: scalar.status || "",
+    keyResults: parseYamlObjectArray(frontmatter, "key-results").map((item) => ({
+      id: item.id || "",
+      objective: Number(item.objective || 0),
+      objectiveTitle: item["objective-title"] || "",
+      description: item.description || "",
+      type: item.type || "",
+      target: item.target ? Number(item.target) : null,
+      unit: item.unit || "",
+      activity: item.activity || "",
+      domain: item.domain || "",
+      status: item.status || "",
+      score: item.score || "",
+      due: normalizeIsoDate(item.due),
+      nextDue: normalizeIsoDate(item["next-due"])
+    })).filter((item) => item.id)
+  };
+}
+
+function parseYamlObjectArray(frontmatter, key) {
+  const lines = frontmatter.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === `${key}:`);
+  if (start === -1) return [];
+  const items = [];
+  let current = null;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^[A-Za-z0-9_-]+:\s*/.test(line)) break;
+    const itemStart = line.match(/^\s{2}-\s+([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (itemStart) {
+      current = {};
+      current[itemStart[1]] = parseYamlScalarValue(itemStart[2]);
+      items.push(current);
+      continue;
+    }
+    const property = line.match(/^\s{4}([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (property && current) current[property[1]] = parseYamlScalarValue(property[2]);
+  }
+  return items;
+}
+
+function parseYamlScalarValue(value) {
+  const clean = String(value || "").trim();
+  return clean ? clean.replace(/^["']|["']$/g, "") : "";
+}
+
+function parseYamlBoolean(value) {
+  return String(value || "").trim().toLowerCase() === "true";
+}
+
+function updateWeeklyCheckboxesFrontmatter(frontmatter, week, done) {
+  const lines = frontmatter.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === "weekly-checkboxes:");
+  if (start === -1) throw httpError(400, "weekly-checkboxes frontmatter was not found.");
+  let currentWeek = "";
+  let changed = false;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^[A-Za-z0-9_-]+:\s*/.test(line)) break;
+    const weekMatch = line.match(/^\s+(?:-\s*)?week:\s*(.*)$/);
+    if (weekMatch) {
+      currentWeek = normalizeIsoDate(parseYamlScalarValue(weekMatch[1]));
+      continue;
+    }
+    if (currentWeek === week && /^\s+done:\s*/.test(line)) {
+      lines[index] = line.replace(/done:\s*.*/, `done: ${done ? "true" : "false"}`);
+      changed = true;
+      break;
+    }
+  }
+  if (!changed) throw httpError(404, "Sprint checkbox done field was not found.");
+  return lines.join("\n");
+}
+
+async function getPersonalFocusIdea() {
+  const ledgerPath = PERSONAL_IDEA_LEDGER_PATH;
+  const markdown = await readFileIfExists(resolveVaultRelativePath(ledgerPath));
+  if (!markdown.trim()) {
+    return {
+      ledgerPath,
+      title: "",
+      doneLooksLike: "",
+      started: "",
+      ideaPath: "",
+      available: false
+    };
+  }
+
+  const activeSection = extractMarkdownSection(markdown, "Active (1 slot only)");
+  const rows = parseMarkdownTableRows(activeSection);
+  const row = rows[0] || null;
+  if (!row) {
+    return {
+      ledgerPath,
+      title: "",
+      doneLooksLike: "",
+      started: "",
+      ideaPath: "",
+      available: false
+    };
+  }
+
+  const ideaCell = row[0] || "";
+  const link = ideaCell.match(/\[([^\]]+)]\(([^)]+)\)/);
+  const title = stripMarkdown(link?.[1] || ideaCell);
+  const ideaPath = link?.[2] ? await resolveIdeaLedgerLink(link[2]) : "";
+  return {
+    ledgerPath,
+    title,
+    doneLooksLike: stripMarkdown(row[1] || ""),
+    started: stripMarkdown(row[2] || ""),
+    ideaPath,
+    available: Boolean(title)
+  };
+}
+
+function extractMarkdownSection(markdown, headingText) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const start = lines.findIndex((line) => {
+    const match = line.match(/^##\s+(.+)$/);
+    return match && stripMarkdown(match[1]).includes(headingText);
+  });
+  if (start < 0) return "";
+  const end = lines.findIndex((line, index) => index > start && /^##\s+/.test(line));
+  return lines.slice(start + 1, end < 0 ? lines.length : end).join("\n");
+}
+
+function parseMarkdownTableRows(markdown) {
+  return String(markdown || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("|") && line.endsWith("|"))
+    .filter((line) => !/^\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line))
+    .map((line) => line.slice(1, -1).split("|").map((cell) => cell.trim()))
+    .filter((cells) => cells.length >= 2 && !/^idea$/i.test(cells[0]));
+}
+
+async function resolveIdeaLedgerLink(link) {
+  const clean = String(link || "").trim().split("#")[0].replaceAll("\\", "/").replace(/^\/+/, "");
+  if (!clean || /^https?:\/\//i.test(clean)) return "";
+  const withExtension = clean.endsWith(".md") ? clean : `${clean}.md`;
+  const baseDir = path.posix.dirname(PERSONAL_IDEA_LEDGER_PATH);
+  const candidates = [
+    path.posix.normalize(path.posix.join(baseDir, withExtension)),
+    path.posix.normalize(path.posix.join(baseDir, withExtension.replace(/^Ideas\//i, ""))),
+    path.posix.normalize(path.posix.join("2.Areas/Personal/Ideas", withExtension.replace(/^Ideas\//i, "")))
+  ];
+  for (const candidate of Array.from(new Set(candidates))) {
+    try {
+      await fs.access(resolveVaultRelativePath(candidate));
+      return candidate;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  return candidates[0];
+}
+
+function groupPersonalOkrObjectives({ keyResults, activeKr, activityCounts }) {
+  const grouped = new Map();
+  for (const kr of keyResults) {
+    const objectiveId = kr.objective || 0;
+    if (!grouped.has(objectiveId)) {
+      grouped.set(objectiveId, {
+        id: objectiveId,
+        title: kr.objectiveTitle || `Objective ${objectiveId}`,
+        active: false,
+        keyResults: []
+      });
+    }
+    const counts = activityCounts[kr.activity] || { sprintCount: 0, weekCount: 0 };
+    const nextKr = {
+      ...kr,
+      isActive: kr.id === activeKr,
+      progress: getPersonalKrProgress(kr, counts)
+    };
+    const objective = grouped.get(objectiveId);
+    objective.active = objective.active || nextKr.isActive;
+    objective.keyResults.push(nextKr);
+  }
+  return Array.from(grouped.values()).sort((a, b) => a.id - b.id);
+}
+
+function getPersonalKrProgress(kr, counts) {
+  const done = String(kr.status || "").toLowerCase() === "done";
+  if (kr.type === "milestone") {
+    return { kind: "milestone", done, label: done ? "Done" : "Not done" };
+  }
+  if (kr.type === "frequency") {
+    const target = Number(kr.target || 0);
+    return {
+      kind: "frequency",
+      current: counts.weekCount,
+      target,
+      label: `${counts.weekCount}/${target || 0} this week`,
+      dots: target ? Array.from({ length: Math.min(target, 8) }, (_, index) => index < counts.weekCount) : []
+    };
+  }
+  return {
+    kind: "habit",
+    count: counts.sprintCount,
+    label: `${counts.sprintCount} log${counts.sprintCount === 1 ? "" : "s"} this sprint`
+  };
+}
+
+function buildSprintReview({ sprintMeta, activeKr, activityCounts, today }) {
+  const weeklyCheckboxes = sprintMeta.weeklyCheckboxes || [];
+  const uncheckedWeeks = weeklyCheckboxes.filter((item) => !item.done);
+  const activity = sprintMeta.activeKrActivity || activeKr?.activity || "";
+  const counts = activityCounts[activity] || { sprintCount: 0, weekCounts: {} };
+  const target = Number(activeKr?.target || 0);
+  const missedActivityWeeks = activeKr?.type === "frequency" && target
+    ? weeklyCheckboxes
+      .filter((item) => item.week && (!today || item.week <= today))
+      .map((item) => ({
+        week: item.week,
+        label: item.label || `Week of ${item.week}`,
+        count: Number(counts.weekCounts?.[item.week] || 0),
+        target
+      }))
+      .filter((item) => item.count < item.target)
+    : [];
+  const activeKrStatus = String(activeKr?.status || "").toLowerCase();
+  return {
+    uncheckedWeekCount: uncheckedWeeks.length,
+    uncheckedWeeks: uncheckedWeeks.map((item) => ({ week: item.week, label: item.label })),
+    missedActivityWeekCount: missedActivityWeeks.length,
+    missedActivityWeeks,
+    incompleteActiveKr: Boolean(activeKr && activeKrStatus && activeKrStatus !== "done"),
+    activeKrStatus: activeKr?.status || "",
+    activityCount: counts.sprintCount || 0
+  };
+}
+
+function buildSprintPreview({ sprintMeta, today }) {
+  const startsInDays = getIsoDayDiff(today, sprintMeta.sprintStart);
+  return {
+    startsInDays: Number.isFinite(startsInDays) ? startsInDays : null,
+    plannedWeekCount: sprintMeta.weeklyCheckboxes.length,
+    plannedWeeks: sprintMeta.weeklyCheckboxes.map((item) => ({
+      week: item.week,
+      label: item.label,
+      done: item.done
+    }))
+  };
+}
+
+async function countSprintActivities({ activities, sprintStart, sprintEnd }) {
+  const result = {};
+  for (const activity of activities) result[activity] = { sprintCount: 0, weekCount: 0, weekCounts: {} };
+  if (!activities.length || !sprintStart || !sprintEnd) return result;
+  const currentWeekStart = getIsoWeekStart(formatDate(new Date()));
+  const currentWeekEnd = addDaysToIsoDate(currentWeekStart, 6);
+  for (const month of getMonthSlugsBetween(sprintStart, sprintEnd)) {
+    const relativePath = `2.Areas/Personal/fleeting/${month}.md`;
+    let markdown = "";
+    try {
+      markdown = await fs.readFile(resolveVaultRelativePath(relativePath), "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      continue;
+    }
+    let currentDate = "";
+    for (const line of markdown.split(/\r?\n/)) {
+      const heading = line.match(/^##\s+(\d{4}-\d{2}-\d{2})\s*$/);
+      if (heading) {
+        currentDate = heading[1];
+        continue;
+      }
+      if (!currentDate || currentDate < sprintStart || currentDate > sprintEnd) continue;
+      for (const activity of activities) {
+        const pattern = new RegExp(`\\[activity::\\s*${escapeRegExp(activity)}\\s*]`, "i");
+        if (!pattern.test(line)) continue;
+        const activityWeekStart = getIsoWeekStart(currentDate);
+        result[activity].sprintCount += 1;
+        result[activity].weekCounts[activityWeekStart] = Number(result[activity].weekCounts[activityWeekStart] || 0) + 1;
+        if (currentDate >= currentWeekStart && currentDate <= currentWeekEnd) result[activity].weekCount += 1;
+      }
+    }
+  }
+  return result;
+}
+
+function getMonthSlugsBetween(startIso, endIso) {
+  const months = [];
+  const cursor = parseIsoDate(startIso);
+  const end = parseIsoDate(endIso);
+  if (!cursor || !end) return months;
+  cursor.setDate(1);
+  while (cursor <= end) {
+    months.push(getCurrentMonthSlug(cursor));
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return months;
+}
+
+function getIsoWeekStart(isoDate) {
+  const date = parseIsoDate(isoDate);
+  if (!date) return "";
+  const day = date.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  date.setDate(date.getDate() + mondayOffset);
+  return formatDate(date);
+}
+
+function addDaysToIsoDate(isoDate, days) {
+  const date = parseIsoDate(isoDate);
+  if (!date) return "";
+  date.setDate(date.getDate() + days);
+  return formatDate(date);
+}
+
+function getIsoDayDiff(startIso, endIso) {
+  const start = parseIsoDate(startIso);
+  const end = parseIsoDate(endIso);
+  if (!start || !end) return null;
+  return Math.round((end.getTime() - start.getTime()) / 86400000);
+}
+
+function parseIsoDate(isoDate) {
+  const clean = normalizeIsoDate(isoDate);
+  if (!clean) return null;
+  const [year, month, day] = clean.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function normalizeIsoDate(value) {
+  const match = String(value || "").match(/\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : "";
 }
 
 async function getTasks({ status = "open", scope = "all", source = "all", focus = "all", limit = 100 } = {}) {
@@ -3154,6 +4623,16 @@ function normalizeVaultRelativeDir(relativePath) {
     .replace(/\/+$/, "");
   if (!normalized || normalized.includes("..")) {
     throw new Error("Invalid vault relative directory.");
+  }
+  return normalized;
+}
+
+function normalizeVaultRelativeMarkdownPath(relativePath) {
+  const normalized = String(relativePath || "")
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "");
+  if (!normalized || normalized.includes("..") || !normalized.endsWith(".md")) {
+    throw new Error("Invalid vault relative Markdown path.");
   }
   return normalized;
 }

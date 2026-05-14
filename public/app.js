@@ -24,8 +24,13 @@ const CHAT_SESSION_STORAGE_KEY = "secondBrain.activeChatSession";
 const DEEP_WORK_ENABLED_STORAGE_KEY = "secondBrain.deepWork.enabled";
 const DEEP_WORK_GOAL_STORAGE_KEY = "secondBrain.deepWork.goal";
 const DEEP_WORK_SESSION_STORAGE_KEY = "secondBrain.deepWork.sessionPath";
+const RECENT_CONTEXT_STORAGE_KEY = "secondBrain.chat.recentContext";
+const PINNED_CONTEXT_STORAGE_KEY = "secondBrain.chat.pinnedContext";
 const CHAT_SUGGEST_DEBOUNCE_MS = 90;
+const CHAT_CONTEXT_SUGGEST_DEBOUNCE_MS = 420;
 const CHAT_AUTO_RESUME_MS = 30 * 60 * 1000;
+const RECENT_CONTEXT_LIMIT = 6;
+const PINNED_CONTEXT_LIMIT = 8;
 const THEME_CHOICES = new Set(["system", "light", "dark"]);
 const CHAT_THINKING_CHOICES = new Set(["disabled", "enabled"]);
 const systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -64,17 +69,40 @@ const state = {
     requestId: 0
   },
   chatContext: [],
+  recentChatContext: [],
+  pinnedChatContext: [],
+  suggestedChatContext: {
+    query: "",
+    items: [],
+    requestId: 0,
+    hiddenForMessage: "",
+    dismissedForMessage: "",
+    dismissedKeys: new Set()
+  },
   dashboard: null,
+  monthlyReviewGenerating: false,
+  monthlyReviewPath: "",
+  personalSprint: null,
+  personalSprintView: "",
+  sprintOpenObjectives: new Set(),
+  sprintExpandedKr: "",
   config: null,
   searchResults: [],
   pendingTodoText: "",
   pendingChatCaptureSource: "",
+  chatSummarySaving: false,
+  chatTodosExtracting: false,
+  chatNoteCreating: false,
+  chatActionsOpen: false,
   pendingTriageTask: null,
   pendingEdit: null,
   todoSheetMode: "capture",
   todoImportant: true,
   todoUrgent: false,
   captureSaving: false,
+  captureInFlightKey: "",
+  lastCaptureKey: "",
+  lastCaptureAt: 0,
   authSecret: "",
   themePreference: "system",
   toastTimer: null
@@ -102,14 +130,25 @@ const chatSendButton = document.querySelector("#chat-send-button");
 const chatHelperLine = document.querySelector("#chat-helper-line");
 const chatStatus = document.querySelector("#chat-status");
 const chatThinkingButtons = Array.from(document.querySelectorAll("[data-chat-thinking]"));
+const chatActionsMenu = document.querySelector("#chat-actions-menu");
+const chatActionsTrigger = document.querySelector("#chat-actions-trigger");
+const chatActionsPopover = document.querySelector("#chat-actions-popover");
+const chatSaveSummaryButton = document.querySelector("#chat-save-summary");
+const chatExtractTodosButton = document.querySelector("#chat-extract-todos");
+const chatCreateNoteButton = document.querySelector("#chat-create-note");
 const chatSuggestions = document.querySelector("#chat-suggestions");
 const chatContextPanel = document.querySelector("#chat-context-panel");
+const chatSuggestedContext = document.querySelector("#chat-suggested-context");
 const chatNewSessionButton = document.querySelector("#chat-new-session");
 const chatSessionHistoryButton = document.querySelector("#chat-session-history");
 const chatSessionPopover = document.querySelector("#chat-session-popover");
 const deepWorkToggle = document.querySelector("#deep-work-toggle");
 const deepWorkSheet = document.querySelector("#deep-work-sheet");
 const deepWorkGoalInput = document.querySelector("#deep-work-goal");
+const deepWorkRecapInput = document.querySelector("#deep-work-recap");
+const deepWorkRecapField = document.querySelector("#deep-work-recap-field");
+const deepWorkCaptureReflection = document.querySelector("#deep-work-capture-reflection");
+const deepWorkCaptureRow = document.querySelector("#deep-work-capture-row");
 const deepWorkConfirmButton = document.querySelector("#deep-work-confirm");
 const deepWorkStopButton = document.querySelector("#deep-work-stop");
 const deepWorkCancelButtons = Array.from(document.querySelectorAll("[data-deep-work-cancel]"));
@@ -128,10 +167,14 @@ const taskFilterClearButton = document.querySelector("#task-filter-clear");
 const captureViewButtons = Array.from(document.querySelectorAll("[data-capture-view]"));
 const dashboardOverview = document.querySelector("#dashboard-overview");
 const dashboardCaptures = document.querySelector("#dashboard-captures");
+const monthlyReviewButton = document.querySelector("#monthly-review-button");
+const monthlyReviewStatus = document.querySelector("#monthly-review-status");
 const dashboardFocusTasks = document.querySelector("#dashboard-focus-tasks");
 const dashboardDueSoon = document.querySelector("#dashboard-due-soon");
 const dashboardTriage = document.querySelector("#dashboard-triage");
 const dashboardRecentNotes = document.querySelector("#dashboard-recent-notes");
+const sprintContent = document.querySelector("#sprint-content");
+const sprintRefreshButton = document.querySelector("#sprint-refresh-button");
 const todoSheet = document.querySelector("#todo-sheet");
 const todoSheetKicker = todoSheet?.querySelector(".sheet-header .eyebrow");
 const todoSheetTitle = document.querySelector("#todo-sheet-title");
@@ -163,6 +206,7 @@ async function init() {
   initTheme();
   initAuth();
   initDeepWork();
+  initChatContextMemory();
   wireInteractions();
   registerServiceWorker();
   await loadConfig();
@@ -197,10 +241,14 @@ function wireInteractions() {
   deepWorkGoalInput?.addEventListener("input", () => {
     autoResize(deepWorkGoalInput);
   });
+  deepWorkRecapInput?.addEventListener("input", () => {
+    autoResize(deepWorkRecapInput);
+  });
 
   chatText?.addEventListener("input", () => {
     autoResize(chatText);
     updateChatSuggestions();
+    scheduleSuggestedChatContext();
   });
 
   chatText?.addEventListener("click", updateChatSuggestions);
@@ -220,6 +268,25 @@ function wireInteractions() {
 
   chatNewSessionButton?.addEventListener("click", async () => {
     await startNewChatSession();
+  });
+
+  chatActionsTrigger?.addEventListener("click", () => {
+    setChatActionsOpen(!state.chatActionsOpen);
+  });
+
+  chatSaveSummaryButton?.addEventListener("click", async () => {
+    setChatActionsOpen(false);
+    await saveCurrentChatSessionSummary();
+  });
+
+  chatExtractTodosButton?.addEventListener("click", async () => {
+    setChatActionsOpen(false);
+    await extractCurrentChatTodos();
+  });
+
+  chatCreateNoteButton?.addEventListener("click", async () => {
+    setChatActionsOpen(false);
+    await createCurrentChatStructuredNote();
   });
 
   deepWorkToggle?.addEventListener("click", () => {
@@ -352,6 +419,10 @@ function wireInteractions() {
   });
 
   window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.chatActionsOpen) {
+      setChatActionsOpen(false);
+      return;
+    }
     if (event.key === "Escape" && state.chatSessionPickerOpen) {
       closeChatSessionPicker();
       return;
@@ -373,12 +444,33 @@ function wireInteractions() {
     }
   });
 
+  window.addEventListener("click", (event) => {
+    if (state.chatActionsOpen && chatActionsMenu && !chatActionsMenu.contains(event.target)) {
+      setChatActionsOpen(false);
+    }
+  });
+
   indexRunButton?.addEventListener("click", async () => {
     await rebuildIndex();
   });
 
   tasksRefreshButton?.addEventListener("click", async () => {
     await loadTasks();
+  });
+
+  sprintRefreshButton?.addEventListener("click", async () => {
+    await loadPersonalSprint();
+  });
+
+  monthlyReviewButton?.addEventListener("click", async () => {
+    await createMonthlyFleetingReview();
+  });
+
+  monthlyReviewStatus?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-open-note]");
+    if (!button) return;
+    event.preventDefault();
+    openObsidianNote(button.dataset.openNote || "");
   });
 
   actionToast?.addEventListener("click", async (event) => {
@@ -390,9 +482,12 @@ function wireInteractions() {
   });
 
   tasksList?.addEventListener("click", handleTaskActionClick);
-  chatTimeline?.addEventListener("click", handleChatSourceClick);
+  sprintContent?.addEventListener("click", handleSprintClick);
+  sprintContent?.addEventListener("change", handleSprintChange);
+  chatTimeline?.addEventListener("click", handleChatTimelineClick);
   chatSuggestions?.addEventListener("mousedown", handleChatSuggestionPointer);
   chatContextPanel?.addEventListener("click", handleChatContextPanelClick);
+  chatSuggestedContext?.addEventListener("click", handleSuggestedChatContextClick);
   tasksList?.addEventListener("dblclick", handleTaskEditDoubleClick);
   timeline?.addEventListener("change", handleCaptureCategoryChange);
   timeline?.addEventListener("pointerdown", handleCapturePointerDown);
@@ -468,6 +563,21 @@ function initDeepWork() {
     state.deepWorkEnabled = false;
   }
   renderDeepWorkState();
+}
+
+function initChatContextMemory() {
+  try {
+    const items = JSON.parse(window.localStorage.getItem(RECENT_CONTEXT_STORAGE_KEY) || "[]");
+    state.recentChatContext = Array.isArray(items) ? items.slice(0, RECENT_CONTEXT_LIMIT) : [];
+  } catch {
+    state.recentChatContext = [];
+  }
+  try {
+    const items = JSON.parse(window.localStorage.getItem(PINNED_CONTEXT_STORAGE_KEY) || "[]");
+    state.pinnedChatContext = Array.isArray(items) ? items.slice(0, PINNED_CONTEXT_LIMIT) : [];
+  } catch {
+    state.pinnedChatContext = [];
+  }
 }
 
 function saveAuthSecret() {
@@ -608,6 +718,10 @@ function setActiveTab(tab) {
   if (tab === "tasks") {
     loadTasks();
   }
+
+  if (tab === "sprint") {
+    loadPersonalSprint();
+  }
 }
 
 function openTaskView({ scope = "all", focus = "all" } = {}) {
@@ -677,6 +791,13 @@ function openDeepWorkSheet() {
     deepWorkGoalInput.value = state.deepWorkGoal || "";
     autoResize(deepWorkGoalInput);
   }
+  if (deepWorkRecapInput) {
+    deepWorkRecapInput.value = "";
+    autoResize(deepWorkRecapInput);
+  }
+  if (deepWorkRecapField) deepWorkRecapField.hidden = !state.deepWorkEnabled;
+  if (deepWorkCaptureRow) deepWorkCaptureRow.hidden = !state.deepWorkEnabled;
+  if (deepWorkCaptureReflection) deepWorkCaptureReflection.checked = true;
   if (deepWorkStopButton) deepWorkStopButton.hidden = !state.deepWorkEnabled;
   if (deepWorkConfirmButton) deepWorkConfirmButton.textContent = state.deepWorkEnabled ? "Update" : "Start";
   deepWorkSheet.hidden = false;
@@ -728,10 +849,16 @@ async function saveDeepWorkGoal() {
 
 async function stopDeepWork() {
   const sessionPath = state.deepWorkSessionPath || "";
+  const recap = String(deepWorkRecapInput?.value || "").trim();
+  const captureReflection = Boolean(deepWorkCaptureReflection?.checked && recap);
   if (deepWorkStopButton) deepWorkStopButton.disabled = true;
   if (sessionPath) {
     try {
-      await postJson("/api/deep-work/stop", { sessionPath });
+      await postJson("/api/deep-work/stop", {
+        sessionPath,
+        recap,
+        captureReflection
+      });
     } catch (error) {
       flashChatHelper(error.message);
       if (deepWorkStopButton) deepWorkStopButton.disabled = false;
@@ -749,7 +876,7 @@ async function stopDeepWork() {
   if (deepWorkStopButton) deepWorkStopButton.disabled = false;
   closeDeepWorkSheet();
   renderDeepWorkState();
-  flashChatHelper("Deep Work mode off.");
+  flashChatHelper(captureReflection ? "Deep Work ended · reflection captured." : "Deep Work mode off.");
 }
 
 function getThinkingLabel() {
@@ -808,6 +935,7 @@ async function loadStoredChatSession() {
     forgetStoredChatSession();
     state.chatSession = null;
     state.chatMessages = [];
+    renderChat();
     renderChatSessionState();
     flashChatHelper(error.message);
   }
@@ -833,8 +961,22 @@ async function startNewChatSession() {
   state.chatMessages = [];
   forgetStoredChatSession();
   renderChat();
-  renderChatSessionState();
-  flashChatHelper("New session ready.");
+    renderChatSessionState();
+    renderChatSessionActionsState();
+    flashChatHelper("New session ready.");
+  chatText?.focus();
+}
+
+async function startChatWithDraft(message, contextItems = []) {
+  await startNewChatSession();
+  state.chatContext = (contextItems || []).map((item) => normalizeChatContextItem(item, item.kind || "file", ""));
+  renderChatContextPanel();
+  if (chatText) {
+    chatText.value = message || "";
+    autoResize(chatText);
+  }
+  scheduleSuggestedChatContext();
+  setActiveTab("chat");
   chatText?.focus();
 }
 
@@ -1128,6 +1270,35 @@ function renderChatSessionState() {
   const label = state.chatSession?.title ? `Open chat sessions. Current session: ${state.chatSession.title}` : "Open chat sessions";
   chatSessionHistoryButton.setAttribute("aria-label", label);
   chatSessionHistoryButton.title = state.chatSession?.path || "Sessions";
+  renderChatSessionActionsState();
+}
+
+function renderChatSessionActionsState() {
+  const hasAssistantText = state.chatMessages.some((message) => message.role === "assistant" && !message.isPending && !message.isError && String(message.content || "").trim());
+  const disabled = state.chatSummarySaving || state.chatTodosExtracting || state.chatNoteCreating || !hasAssistantText;
+  if (chatActionsTrigger) {
+    chatActionsTrigger.disabled = disabled;
+    chatActionsTrigger.setAttribute("aria-expanded", String(state.chatActionsOpen));
+  }
+  if (chatSaveSummaryButton) {
+    chatSaveSummaryButton.disabled = disabled;
+    chatSaveSummaryButton.textContent = state.chatSummarySaving ? "Saving..." : "Save summary";
+  }
+  if (chatExtractTodosButton) {
+    chatExtractTodosButton.disabled = disabled;
+    chatExtractTodosButton.textContent = state.chatTodosExtracting ? "Extracting..." : "Extract todos";
+  }
+  if (chatCreateNoteButton) {
+    chatCreateNoteButton.disabled = disabled;
+    chatCreateNoteButton.textContent = state.chatNoteCreating ? "Creating..." : "Create note";
+  }
+  if (disabled && state.chatActionsOpen) setChatActionsOpen(false);
+}
+
+function setChatActionsOpen(open) {
+  state.chatActionsOpen = Boolean(open);
+  if (chatActionsPopover) chatActionsPopover.hidden = !state.chatActionsOpen;
+  if (chatActionsTrigger) chatActionsTrigger.setAttribute("aria-expanded", String(state.chatActionsOpen));
 }
 
 function formatSessionUpdated(value) {
@@ -1343,6 +1514,7 @@ function addChatContextItem(item, kind, trigger) {
   if (!normalized) return;
   const exists = state.chatContext.some((context) => getChatContextKey(context) === getChatContextKey(normalized));
   if (!exists) state.chatContext.push(normalized);
+  rememberChatContextItem(normalized);
 }
 
 function normalizeChatContextItem(item, kind, trigger) {
@@ -1377,13 +1549,146 @@ function slugifyUiToken(value) {
 function renderChatContextPanel() {
   if (!chatContextPanel) return;
   const items = state.chatContext || [];
-  chatContextPanel.hidden = !items.length;
-  chatContextPanel.innerHTML = items.length ? `
-    <button class="chat-context-label" type="button" data-context-details>Context</button>
-    <div class="chat-context-chips">
-      ${items.map((item) => renderChatContextChip(item, { removable: true })).join("")}
-    </div>
+  const pinned = getUnselectedContextItems(state.pinnedChatContext || [], items);
+  const recent = getUnselectedContextItems(state.recentChatContext || [], [...items, ...pinned]);
+  chatContextPanel.hidden = !items.length && !pinned.length && !recent.length;
+  chatContextPanel.innerHTML = items.length || pinned.length || recent.length ? `
+    ${items.length ? `
+      <button class="chat-context-label" type="button" data-context-details>Context</button>
+      <div class="chat-context-chips">
+        ${items.map((item) => renderChatContextChip(item, { removable: true })).join("")}
+      </div>
+    ` : ""}
+    ${pinned.length ? `
+      <div class="chat-context-recent chat-context-pinned" aria-label="Pinned context">
+        <span>Pinned</span>
+        ${pinned.slice(0, 5).map((item) => renderMemoryChatContextButton(item, "pinned")).join("")}
+      </div>
+    ` : ""}
+    ${recent.length ? `
+      <div class="chat-context-recent" aria-label="Recent context">
+        <span>Recent</span>
+        ${recent.slice(0, 4).map((item) => renderMemoryChatContextButton(item, "recent")).join("")}
+      </div>
+    ` : ""}
   ` : "";
+}
+
+function getUnselectedContextItems(items, selectedItems) {
+  const selectedKeys = new Set((selectedItems || []).map(getChatContextKey));
+  return (items || []).filter((item) => !selectedKeys.has(getChatContextKey(item)));
+}
+
+function scheduleSuggestedChatContext() {
+  window.clearTimeout(scheduleSuggestedChatContext.timer);
+  scheduleSuggestedChatContext.timer = window.setTimeout(loadSuggestedChatContext, CHAT_CONTEXT_SUGGEST_DEBOUNCE_MS);
+}
+
+async function loadSuggestedChatContext() {
+  if (!chatText || !chatSuggestedContext) return;
+  const message = String(chatText.value || "").trim();
+  if (state.suggestedChatContext.dismissedForMessage !== message) {
+    state.suggestedChatContext.dismissedForMessage = message;
+    state.suggestedChatContext.dismissedKeys = new Set();
+  }
+  const hasReferenceToken = /(?:^|\s)[#/@][A-Za-z0-9_-]*$/.test(message.slice(0, chatText.selectionStart || message.length));
+  if (message.length < 8 || hasReferenceToken || state.suggestedChatContext.hiddenForMessage === message) {
+    state.suggestedChatContext.items = [];
+    state.suggestedChatContext.query = "";
+    renderSuggestedChatContext();
+    return;
+  }
+
+  const requestId = state.suggestedChatContext.requestId + 1;
+  state.suggestedChatContext.requestId = requestId;
+  try {
+    const query = getSuggestedContextQuery(message);
+    const data = await protectedGetJson(`/api/chat/context-suggestions?q=${encodeURIComponent(query)}`);
+    if (requestId !== state.suggestedChatContext.requestId) return;
+    state.suggestedChatContext.query = data.query || "";
+    state.suggestedChatContext.items = mergeUiContextItems([
+      ...getDeepWorkSuggestedContextItems(),
+      ...(data.suggestions || [])
+    ]);
+    renderSuggestedChatContext();
+  } catch {
+    if (requestId !== state.suggestedChatContext.requestId) return;
+    state.suggestedChatContext.items = [];
+    renderSuggestedChatContext();
+  }
+}
+
+function getSuggestedContextQuery(message) {
+  return [
+    message,
+    state.deepWorkEnabled ? state.deepWorkGoal : ""
+  ].filter(Boolean).join("\n");
+}
+
+function getDeepWorkSuggestedContextItems() {
+  if (!state.deepWorkEnabled) return [];
+  const items = [];
+  if (state.deepWorkSessionPath) {
+    items.push({
+      id: state.deepWorkSessionPath,
+      kind: "file",
+      title: "Active Deep Work log",
+      name: "Active Deep Work log",
+      token: "active-deep-work",
+      path: state.deepWorkSessionPath,
+      type: "deep-work-session"
+    });
+  }
+  const sprint = state.personalSprint?.sprint;
+  if (sprint?.path) {
+    items.push({
+      id: sprint.path,
+      kind: "file",
+      title: "Current sprint",
+      name: "Current sprint",
+      token: "current-sprint",
+      path: sprint.path,
+      type: "sprint"
+    });
+  }
+  return items;
+}
+
+function renderSuggestedChatContext() {
+  if (!chatSuggestedContext) return;
+  const selected = state.chatContext || [];
+  const dismissed = state.suggestedChatContext.dismissedKeys || new Set();
+  const suggestions = getUnselectedContextItems(state.suggestedChatContext.items || [], selected)
+    .filter((item) => !dismissed.has(getChatContextKey(item)))
+    .slice(0, 4);
+  chatSuggestedContext.hidden = !suggestions.length;
+  chatSuggestedContext.innerHTML = suggestions.length ? `
+    <span class="chat-context-label">Suggested</span>
+    <div class="chat-context-chips">
+      ${suggestions.map(renderSuggestedChatContextButton).join("")}
+    </div>
+    <button class="chat-context-hide" type="button" data-context-hide-suggestions>Hide</button>
+  ` : "";
+}
+
+function renderSuggestedChatContextButton(item) {
+  const title = item.title || item.name || item.token || item.path || "Context";
+  return `
+    <button class="chat-context-suggestion" type="button" data-context-suggested="${escapeHtml(getChatContextKey(item))}" title="${escapeHtml(item.path || title)}">
+      <span>${escapeHtml(getChatContextPrefix(item.kind))}</span>
+      <strong>${escapeHtml(title)}</strong>
+    </button>
+  `;
+}
+
+function renderMemoryChatContextButton(item, source) {
+  const title = item.title || item.name || item.token || item.path || "Context";
+  return `
+    <button type="button" data-context-${escapeHtml(source)}="${escapeHtml(getChatContextKey(item))}" title="${escapeHtml(item.path || title)}">
+      <span>${escapeHtml(getChatContextPrefix(item.kind))}</span>
+      <strong>${escapeHtml(title)}</strong>
+    </button>
+  `;
 }
 
 function renderChatContextChip(item, { removable = false } = {}) {
@@ -1409,6 +1714,26 @@ function getChatContextPrefix(kind) {
 }
 
 function handleChatContextPanelClick(event) {
+  const pinnedButton = event.target.closest("[data-context-pinned]");
+  if (pinnedButton) {
+    const item = findChatContextItemByKey(pinnedButton.dataset.contextPinned, state.pinnedChatContext);
+    if (item) {
+      addChatContextItem(item, item.kind, getChatContextPrefix(item.kind));
+      renderChatContextPanel();
+      renderSuggestedChatContext();
+    }
+    return;
+  }
+  const recentButton = event.target.closest("[data-context-recent]");
+  if (recentButton) {
+    const item = findChatContextItemByKey(recentButton.dataset.contextRecent, state.recentChatContext);
+    if (item) {
+      addChatContextItem(item, item.kind, getChatContextPrefix(item.kind));
+      renderChatContextPanel();
+      renderSuggestedChatContext();
+    }
+    return;
+  }
   const button = event.target.closest("[data-context-remove]");
   if (button) {
     const key = button.dataset.contextRemove;
@@ -1422,6 +1747,84 @@ function handleChatContextPanelClick(event) {
   if (detailsButton || chip) {
     event.preventDefault();
     openContextSheet();
+  }
+}
+
+function handleSuggestedChatContextClick(event) {
+  const hideButton = event.target.closest("[data-context-hide-suggestions]");
+  if (hideButton) {
+    state.suggestedChatContext.hiddenForMessage = String(chatText?.value || "").trim();
+    state.suggestedChatContext.items = [];
+    renderSuggestedChatContext();
+    chatText?.focus();
+    return;
+  }
+  const button = event.target.closest("[data-context-suggested]");
+  if (!button) return;
+  const item = findChatContextItemByKey(button.dataset.contextSuggested, state.suggestedChatContext.items);
+  if (!item) return;
+  addChatContextItem(item, item.kind, getChatContextPrefix(item.kind));
+  renderChatContextPanel();
+  renderSuggestedChatContext();
+  chatText?.focus();
+}
+
+function findChatContextItemByKey(key, items = []) {
+  return (items || []).find((item) => getChatContextKey(item) === String(key || ""));
+}
+
+function mergeUiContextItems(items = []) {
+  const merged = new Map();
+  for (const item of items) {
+    const normalized = normalizeChatContextItem(item, item.kind, getChatContextPrefix(item.kind));
+    if (!normalized) continue;
+    const key = getChatContextKey(normalized);
+    if (!merged.has(key)) merged.set(key, normalized);
+  }
+  return Array.from(merged.values());
+}
+
+function pinChatContextItem(item) {
+  const normalized = normalizeChatContextItem(item, item.kind, getChatContextPrefix(item.kind));
+  if (!normalized) return;
+  const key = getChatContextKey(normalized);
+  state.pinnedChatContext = [
+    normalized,
+    ...(state.pinnedChatContext || []).filter((context) => getChatContextKey(context) !== key)
+  ].slice(0, PINNED_CONTEXT_LIMIT);
+  savePinnedChatContext();
+}
+
+function unpinChatContextItem(key) {
+  state.pinnedChatContext = (state.pinnedChatContext || []).filter((item) => getChatContextKey(item) !== key);
+  savePinnedChatContext();
+}
+
+function isPinnedChatContext(item) {
+  const key = getChatContextKey(item);
+  return (state.pinnedChatContext || []).some((context) => getChatContextKey(context) === key);
+}
+
+function savePinnedChatContext() {
+  try {
+    window.localStorage.setItem(PINNED_CONTEXT_STORAGE_KEY, JSON.stringify(state.pinnedChatContext || []));
+  } catch {
+    // Pinned context is a convenience only.
+  }
+}
+
+function rememberChatContextItem(item) {
+  const normalized = normalizeChatContextItem(item, item.kind, getChatContextPrefix(item.kind));
+  if (!normalized) return;
+  const key = getChatContextKey(normalized);
+  state.recentChatContext = [
+    normalized,
+    ...(state.recentChatContext || []).filter((context) => getChatContextKey(context) !== key)
+  ].slice(0, RECENT_CONTEXT_LIMIT);
+  try {
+    window.localStorage.setItem(RECENT_CONTEXT_STORAGE_KEY, JSON.stringify(state.recentChatContext));
+  } catch {
+    // Recent context is a convenience only.
   }
 }
 
@@ -1441,16 +1844,38 @@ function closeContextSheet() {
 
 function renderContextSheet() {
   if (!contextDetailList) return;
-  const items = state.chatContext || [];
-  contextDetailList.innerHTML = items.length ? items.map(renderContextDetailItem).join("") : `
-    <p class="quiet-line">No selected context yet. Use /skill, @person, or #file in the chat box.</p>
+  const selected = state.chatContext || [];
+  const pinned = getUnselectedContextItems(state.pinnedChatContext || [], selected);
+  const recent = getUnselectedContextItems(state.recentChatContext || [], [...selected, ...pinned]).slice(0, 6);
+  const suggested = getUnselectedContextItems(state.suggestedChatContext.items || [], [...selected, ...pinned, ...recent])
+    .filter((item) => !(state.suggestedChatContext.dismissedKeys || new Set()).has(getChatContextKey(item)))
+    .slice(0, 6);
+  const sections = [
+    renderContextDetailSection("Selected", selected, "selected"),
+    renderContextDetailSection("Pinned", pinned, "pinned"),
+    renderContextDetailSection("Recent", recent, "recent"),
+    renderContextDetailSection("Suggested", suggested, "suggested")
+  ].filter(Boolean).join("");
+  contextDetailList.innerHTML = sections || `
+    <p class="quiet-line">No context yet. Use /skill, @person, #file, or suggested chips in the chat box.</p>
   `;
 }
 
-function renderContextDetailItem(item) {
+function renderContextDetailSection(title, items, source) {
+  if (!items?.length) return "";
+  return `
+    <section class="context-detail-section">
+      <h3>${escapeHtml(title)}</h3>
+      ${items.map((item) => renderContextDetailItem(item, source)).join("")}
+    </section>
+  `;
+}
+
+function renderContextDetailItem(item, source = "selected") {
   const title = item.title || item.name || item.path || "Context";
   const kind = getReferenceKindSingular(item.kind);
   const key = getChatContextKey(item);
+  const pinned = isPinnedChatContext(item);
   return `
     <article class="context-detail-card">
       <div>
@@ -1460,17 +1885,58 @@ function renderContextDetailItem(item) {
       </div>
       <div class="context-detail-actions">
         ${item.path ? `<button type="button" data-open-note="${escapeHtml(item.path)}">Open</button>` : ""}
-        <button type="button" data-context-remove="${escapeHtml(key)}">Remove</button>
+        ${source !== "selected" ? `<button type="button" data-context-add="${escapeHtml(key)}" data-context-source="${escapeHtml(source)}">Add</button>` : ""}
+        ${pinned ? `<button type="button" data-context-unpin="${escapeHtml(key)}">Unpin</button>` : `<button type="button" data-context-pin="${escapeHtml(key)}" data-context-source="${escapeHtml(source)}">Pin</button>`}
+        ${source === "selected" ? `<button type="button" data-context-remove="${escapeHtml(key)}">Remove</button>` : ""}
+        ${source === "suggested" ? `<button type="button" data-context-dismiss="${escapeHtml(key)}">Dismiss</button>` : ""}
       </div>
     </article>
   `;
 }
 
 function handleContextSheetClick(event) {
+  const addButton = event.target.closest("[data-context-add]");
+  if (addButton) {
+    const item = findContextItemFromSource(addButton.dataset.contextAdd, addButton.dataset.contextSource);
+    if (item) addChatContextItem(item, item.kind, getChatContextPrefix(item.kind));
+    renderChatContextPanel();
+    renderSuggestedChatContext();
+    renderContextSheet();
+    return;
+  }
+
+  const pinButton = event.target.closest("[data-context-pin]");
+  if (pinButton) {
+    const item = findContextItemFromSource(pinButton.dataset.contextPin, pinButton.dataset.contextSource) || findContextItemFromSource(pinButton.dataset.contextPin, "selected");
+    if (item) pinChatContextItem(item);
+    renderChatContextPanel();
+    renderSuggestedChatContext();
+    renderContextSheet();
+    return;
+  }
+
+  const unpinButton = event.target.closest("[data-context-unpin]");
+  if (unpinButton) {
+    unpinChatContextItem(unpinButton.dataset.contextUnpin);
+    renderChatContextPanel();
+    renderSuggestedChatContext();
+    renderContextSheet();
+    return;
+  }
+
+  const dismissButton = event.target.closest("[data-context-dismiss]");
+  if (dismissButton) {
+    state.suggestedChatContext.dismissedKeys.add(dismissButton.dataset.contextDismiss);
+    renderSuggestedChatContext();
+    renderContextSheet();
+    return;
+  }
+
   const removeButton = event.target.closest("[data-context-remove]");
   if (removeButton) {
     state.chatContext = state.chatContext.filter((item) => getChatContextKey(item) !== removeButton.dataset.contextRemove);
     renderChatContextPanel();
+    renderSuggestedChatContext();
     renderContextSheet();
     return;
   }
@@ -1478,8 +1944,21 @@ function handleContextSheetClick(event) {
   const openButton = event.target.closest("[data-open-note]");
   if (openButton) {
     const notePath = openButton.dataset.openNote || "";
-    if (notePath) window.location.href = getObsidianNoteUrl(notePath);
+    if (notePath) openObsidianNote(notePath);
   }
+}
+
+function findContextItemFromSource(key, source) {
+  if (source === "selected") return findChatContextItemByKey(key, state.chatContext);
+  if (source === "pinned") return findChatContextItemByKey(key, state.pinnedChatContext);
+  if (source === "recent") return findChatContextItemByKey(key, state.recentChatContext);
+  if (source === "suggested") return findChatContextItemByKey(key, state.suggestedChatContext.items);
+  return findChatContextItemByKey(key, [
+    ...(state.chatContext || []),
+    ...(state.pinnedChatContext || []),
+    ...(state.recentChatContext || []),
+    ...(state.suggestedChatContext.items || [])
+  ]);
 }
 
 function getSelectedChatContext() {
@@ -1516,13 +1995,15 @@ function renderSettingsDetails(config) {
 
   if (!settingsDetails) return;
   const ignoreCount = Array.isArray(config.ignoreRules) ? config.ignoreRules.length : 0;
-  const ignoreList = Array.isArray(config.ignoreRules) && config.ignoreRules.length
+  const ignoreValue = Array.isArray(config.ignoreRules) ? config.ignoreRules.join("\n") : "";
+  const ignoreList = Array.isArray(config.ignoreRules)
     ? `
       <details class="settings-ignore">
         <summary>Ignored paths <span>${numberFormat(ignoreCount)}</span></summary>
-        <ul>
-          ${config.ignoreRules.map((rule) => `<li>${escapeHtml(rule)}</li>`).join("")}
-        </ul>
+        <textarea data-ignore-rules rows="7" spellcheck="false" placeholder="4.Archive/">${escapeHtml(ignoreValue)}</textarea>
+        <div class="settings-actions">
+          <button class="secondary-button" type="button" data-ignore-save>Save ignored paths</button>
+        </div>
       </details>
     `
     : "";
@@ -1573,6 +2054,20 @@ function renderSettingsDetails(config) {
     </div>
   `;
   settingsDetails.querySelector("[data-auth-open]")?.addEventListener("click", openAuthSheet);
+  settingsDetails.querySelector("[data-ignore-save]")?.addEventListener("click", async () => {
+    const rules = settingsDetails.querySelector("[data-ignore-rules]")?.value || "";
+    try {
+      const data = await postJson("/api/settings/ignore-rules", { rules });
+      state.config.ignoreRules = data.rules || [];
+      renderSettingsDetails(state.config);
+      await refreshTaskSurfaces();
+      flashHelper("Ignored paths saved.");
+      showToast("Ignored paths saved.");
+    } catch (error) {
+      flashHelper(error.message);
+      showToast(error.message, { duration: 3200 });
+    }
+  });
   settingsDetails.querySelector("[data-chat-status-refresh]")?.addEventListener("click", async () => {
     await loadConfig();
     flashHelper("OpenCode status refreshed.");
@@ -1672,6 +2167,25 @@ async function rebuildIndex() {
   }
 }
 
+async function createMonthlyFleetingReview() {
+  state.monthlyReviewGenerating = true;
+  renderMonthlyReviewState();
+  try {
+    const result = await postJson("/api/reviews/monthly-fleeting", {});
+    state.monthlyReviewPath = result.review?.path || "";
+    await loadIndexStatus();
+    if (state.dashboard) await loadDashboard();
+    showToast("Monthly review created.");
+    renderMonthlyReviewState();
+  } catch (error) {
+    showToast(error.message, { duration: 3400 });
+    if (monthlyReviewStatus) monthlyReviewStatus.textContent = error.message;
+  } finally {
+    state.monthlyReviewGenerating = false;
+    renderMonthlyReviewState();
+  }
+}
+
 async function runSearch() {
   const query = searchInput?.value.trim() || "";
   if (searchResults) {
@@ -1710,6 +2224,9 @@ async function submitChat() {
   }
   state.chatContext = [];
   renderChatContextPanel();
+  state.suggestedChatContext.items = [];
+  state.suggestedChatContext.dismissedKeys = new Set();
+  renderSuggestedChatContext();
   flashChatHelper("Thinking...");
   renderChat();
   const payloadHistory = state.chatMessages
@@ -1772,6 +2289,7 @@ async function submitChat() {
     flashChatHelper(data.sources?.length
       ? `Saved session · used ${data.sources.length} source${data.sources.length === 1 ? "" : "s"}.`
       : "Saved session.");
+    renderChatSessionActionsState();
   } catch (error) {
     if (assistantMessage) {
       updateChatMessage(assistantMessage.id, {
@@ -1794,6 +2312,7 @@ async function submitChat() {
     state.chatSending = false;
     if (chatSendButton) chatSendButton.disabled = false;
     renderChat();
+    renderChatSessionActionsState();
     chatText?.focus();
   }
 }
@@ -1830,6 +2349,111 @@ function updateChatMessage(messageId, patch) {
   return changed;
 }
 
+async function handleChatTimelineClick(event) {
+  handleChatSourceClick(event);
+}
+
+async function saveCurrentChatSessionSummary() {
+  const transcript = getCurrentChatTranscript();
+  if (!transcript) {
+    showToast("No chat content to summarize.", { duration: 2200 });
+    return;
+  }
+  const sessionPath = state.chatSession?.path || getActiveChatSessionPath() || "";
+  state.chatSummarySaving = true;
+  renderChatSessionActionsState();
+  try {
+    const result = await postJson("/api/chat/capture", {
+      category: "thought",
+      text: transcript,
+      sessionPath
+    });
+    await loadCaptures();
+    if (document.querySelector("[data-tab-panel].is-active")?.dataset.tabPanel === "dashboard") {
+      await loadDashboard();
+    }
+    showToast("Chat summary saved.");
+    flashChatHelper(`Saved summary to ${relativeMonthlyPath(result.monthlyFile || "")}`);
+  } catch (error) {
+    showToast(error.message, { duration: 3200 });
+    flashChatHelper(error.message);
+  } finally {
+    state.chatSummarySaving = false;
+    renderChatSessionActionsState();
+  }
+}
+
+async function extractCurrentChatTodos() {
+  const transcript = getCurrentChatTranscript();
+  if (!transcript) {
+    showToast("No chat content to extract.", { duration: 2200 });
+    return;
+  }
+  const sessionPath = state.chatSession?.path || getActiveChatSessionPath() || "";
+  state.chatTodosExtracting = true;
+  renderChatSessionActionsState();
+  try {
+    const result = await postJson("/api/chat/extract-todos", {
+      text: transcript,
+      sessionPath
+    });
+    await loadCaptures();
+    await refreshTaskSurfaces();
+    const count = Number(result.count || 0);
+    if (count) {
+      showToast(`Saved ${count} todo${count === 1 ? "" : "s"}.`);
+      flashChatHelper(`Saved ${count} todo${count === 1 ? "" : "s"} to ${relativeMonthlyPath(result.monthlyFile || "")}`);
+    } else {
+      showToast("No todos found.", { duration: 2200 });
+      flashChatHelper("No todos found in this session.");
+    }
+  } catch (error) {
+    showToast(error.message, { duration: 3200 });
+    flashChatHelper(error.message);
+  } finally {
+    state.chatTodosExtracting = false;
+    renderChatSessionActionsState();
+  }
+}
+
+async function createCurrentChatStructuredNote() {
+  const transcript = getCurrentChatTranscript();
+  if (!transcript) {
+    showToast("No chat content to turn into a note.", { duration: 2200 });
+    return;
+  }
+  const sessionPath = state.chatSession?.path || getActiveChatSessionPath() || "";
+  state.chatNoteCreating = true;
+  renderChatSessionActionsState();
+  try {
+    const result = await postJson("/api/chat/create-note", {
+      text: transcript,
+      sessionPath
+    });
+    await loadIndexStatus();
+    const notePath = result.note?.path || "";
+    showToast("Structured note created.");
+    flashChatHelper(notePath ? `Created note: ${notePath}` : "Created structured note.");
+    if (document.querySelector("[data-tab-panel].is-active")?.dataset.tabPanel === "dashboard") {
+      await loadDashboard();
+    }
+  } catch (error) {
+    showToast(error.message, { duration: 3200 });
+    flashChatHelper(error.message);
+  } finally {
+    state.chatNoteCreating = false;
+    renderChatSessionActionsState();
+  }
+}
+
+function getCurrentChatTranscript() {
+  const messages = (state.chatMessages || [])
+    .filter((message) => !message.isPending && !message.isError && String(message.content || "").trim())
+    .filter((message) => message.role === "user" || message.role === "assistant");
+  if (!messages.length) return "";
+  return messages.map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`).join("\n\n");
+}
+
 function handleChatSourceClick(event) {
   const deepWorkButton = event.target.closest("[data-deep-work-edit]");
   if (deepWorkButton) {
@@ -1841,7 +2465,7 @@ function handleChatSourceClick(event) {
   if (!button) return;
   event.preventDefault();
   const path = button.dataset.openNote || "";
-  if (path) window.location.href = getObsidianNoteUrl(path);
+  if (path) openObsidianNote(path);
 }
 
 function openTodoSheet({ mode = "capture", text = "", task = null } = {}) {
@@ -1901,9 +2525,19 @@ function renderTodoSheetState() {
 }
 
 async function submitCapture(text, metadata = {}) {
+  const captureKey = getCaptureSubmissionKey(text, metadata);
+  if (state.captureSaving && state.captureInFlightKey === captureKey) {
+    showToast("Already saving that capture.");
+    return;
+  }
+  if (isRecentCaptureDuplicate(captureKey)) {
+    showToast("Already saved that capture.");
+    return;
+  }
   if (state.captureSaving) return;
   state.captureSaving = true;
-  sendButton.disabled = true;
+  state.captureInFlightKey = captureKey;
+  setCaptureSavingState(true);
   if (todoConfirmButton) todoConfirmButton.disabled = true;
   if (helperLine) helperLine.textContent = "Saving...";
 
@@ -1919,16 +2553,45 @@ async function submitCapture(text, metadata = {}) {
     autoResize(textarea);
     if (todoSheet && !todoSheet.hidden) closeTodoSheet();
     await loadCaptures();
+    state.lastCaptureKey = captureKey;
+    state.lastCaptureAt = Date.now();
     flashHelper(`Saved to ${relativeMonthlyPath(result.monthlyFile)}`);
+    showToast("Saved.");
     textarea.focus();
   } catch (error) {
     flashHelper(error.message);
+    showToast(error.message, { duration: 3200 });
   } finally {
     state.pendingChatCaptureSource = "";
     state.captureSaving = false;
-    sendButton.disabled = false;
+    state.captureInFlightKey = "";
+    setCaptureSavingState(false);
     if (todoConfirmButton) todoConfirmButton.disabled = false;
   }
+}
+
+function setCaptureSavingState(isSaving) {
+  if (!sendButton) return;
+  sendButton.disabled = isSaving;
+  sendButton.classList.toggle("is-saving", isSaving);
+  sendButton.setAttribute("aria-busy", isSaving ? "true" : "false");
+  sendButton.setAttribute("aria-label", isSaving ? "Saving capture" : "Append capture");
+}
+
+function getCaptureSubmissionKey(text, metadata = {}) {
+  const normalizedText = String(text || "").trim().replace(/\s+/g, " ");
+  const normalizedMetadata = {
+    category: state.category,
+    source: metadata.source || state.pendingChatCaptureSource || "",
+    important: metadata.important ?? "",
+    urgent: metadata.urgent ?? "",
+    due: metadata.due || ""
+  };
+  return JSON.stringify([normalizedText, normalizedMetadata]);
+}
+
+function isRecentCaptureDuplicate(captureKey) {
+  return Boolean(captureKey && state.lastCaptureKey === captureKey && Date.now() - state.lastCaptureAt < 5000);
 }
 
 async function submitTaskTriage(metadata = {}) {
@@ -2209,6 +2872,40 @@ function getObsidianNoteUrl(notePath) {
   const vault = state.config?.vaultName || "";
   const file = String(notePath || "").replace(/\.md$/i, "");
   return `obsidian://open?vault=${encodeURIComponent(vault)}&file=${encodeURIComponent(file)}`;
+}
+
+function openObsidianNote(notePath) {
+  const cleanPath = String(notePath || "").trim();
+  if (!cleanPath) {
+    flashHelper("No note path available.");
+    return false;
+  }
+
+  const url = getObsidianNoteUrl(cleanPath);
+  try {
+    const opened = window.open(url, "_blank");
+    if (opened) {
+      flashHelper("Opening note in Obsidian...");
+      return true;
+    }
+  } catch {
+    // Fall through to same-tab navigation for browsers that block popups.
+  }
+
+  window.location.assign(url);
+  flashHelper("Opening note in Obsidian...");
+  return true;
+}
+
+function renderObsidianNoteLink(notePath, label, title = "") {
+  const cleanPath = String(notePath || "").trim();
+  if (!cleanPath) return "";
+  const linkTitle = title || cleanPath;
+  return `
+    <a class="note-link-button" href="${escapeHtml(getObsidianNoteUrl(cleanPath))}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(linkTitle)}">
+      ${escapeHtml(label)}
+    </a>
+  `;
 }
 
 function renderChat() {
@@ -2714,6 +3411,7 @@ function renderDashboard() {
   if (!state.dashboard) return;
   renderDashboardOverview(state.dashboard);
   renderDashboardCaptures(state.dashboard.recentCaptures || []);
+  renderMonthlyReviewState();
   renderDashboardTaskList(dashboardFocusTasks, state.dashboard.highFocusTasks || [], "No high-focus tasks in the current index.");
   renderDashboardTaskList(dashboardDueSoon, state.dashboard.dueSoonTasks || [], "No due-soon tasks in the current index.");
   renderDashboardTaskList(dashboardTriage, state.dashboard.triageTasks || [], "No tasks need triage.");
@@ -2774,6 +3472,28 @@ function renderDashboardCaptures(captures) {
   `).join("");
 }
 
+function renderMonthlyReviewState() {
+  if (monthlyReviewButton) {
+    monthlyReviewButton.disabled = state.monthlyReviewGenerating;
+    monthlyReviewButton.textContent = state.monthlyReviewGenerating ? "Reviewing..." : "Review";
+  }
+  if (!monthlyReviewStatus) return;
+  if (state.monthlyReviewGenerating) {
+    monthlyReviewStatus.textContent = "Reviewing this month's fleeting note...";
+    return;
+  }
+  if (state.monthlyReviewPath) {
+    monthlyReviewStatus.innerHTML = `
+      Draft created:
+      <button class="inline-note-link" type="button" data-open-note="${escapeHtml(state.monthlyReviewPath)}">
+        ${escapeHtml(state.monthlyReviewPath)}
+      </button>
+    `;
+    return;
+  }
+  monthlyReviewStatus.textContent = "Create a draft review from this month's fleeting note.";
+}
+
 function renderDashboardTaskList(target, tasks, emptyMessage) {
   if (!target) return;
   if (!tasks.length) {
@@ -2808,6 +3528,7 @@ function renderDashboardLoading() {
   [dashboardOverview, dashboardCaptures, dashboardFocusTasks, dashboardDueSoon, dashboardTriage, dashboardRecentNotes].forEach((target) => {
     if (target) target.innerHTML = `<p class="quiet-line">Loading...</p>`;
   });
+  renderMonthlyReviewState();
 }
 
 function renderDashboardError(message) {
@@ -2819,6 +3540,396 @@ function renderDashboardError(message) {
       </div>
     `;
   }
+}
+
+async function loadPersonalSprint(view = state.personalSprintView) {
+  if (!sprintContent) return;
+  renderSprintLoading();
+  try {
+    const query = view ? `?view=${encodeURIComponent(view)}` : "";
+    const previousPath = state.personalSprint?.sprint?.path || "";
+    state.personalSprint = await getJson(`/api/personal-sprint${query}`);
+    state.personalSprintView = state.personalSprint?.sprint?.view || "";
+    if (previousPath && previousPath !== state.personalSprint?.sprint?.path) {
+      state.sprintOpenObjectives = new Set();
+      state.sprintExpandedKr = "";
+    }
+    initializeSprintOpenObjectives();
+    renderPersonalSprint();
+  } catch (error) {
+    renderSprintError(error.message);
+  }
+}
+
+function initializeSprintOpenObjectives() {
+  const objectives = state.personalSprint?.okr?.objectives || [];
+  if (state.sprintOpenObjectives.size) return;
+  objectives
+    .filter((objective) => objective.active)
+    .forEach((objective) => state.sprintOpenObjectives.add(String(objective.id)));
+}
+
+function renderPersonalSprint() {
+  if (!sprintContent || !state.personalSprint) return;
+  const { sprint, okr, focus } = state.personalSprint;
+  sprintContent.innerHTML = `
+    ${renderSprintViewTabs(sprint)}
+    <section class="sprint-card active-sprint-card ${sprint.isStale ? "is-stale" : ""}">
+      <div class="sprint-card-head">
+        <div>
+          <span class="sprint-kicker">Sprint</span>
+          <h2>${escapeHtml(formatSprintRange(sprint.start, sprint.end))}</h2>
+        </div>
+        <div class="sprint-actions">
+          <button class="note-link-button" type="button" data-sprint-chat>Open in chat</button>
+          ${renderObsidianNoteLink(sprint.path, "Open sprint")}
+        </div>
+      </div>
+      ${sprint.isStale ? `<p class="sprint-warning">${escapeHtml(sprint.staleMessage || "Sprint is stale.")}</p>` : ""}
+      <div class="sprint-priority">
+        <span>Priority: KR ${escapeHtml(sprint.activeKr)}</span>
+        <strong>${escapeHtml(sprint.activeKrDescription)}</strong>
+        <small>${escapeHtml(sprint.activeKrType || "kr")} · tracked via [activity:: ${escapeHtml(sprint.activeKrActivity || "none")}]</small>
+      </div>
+      <div class="sprint-checkboxes" aria-label="Weekly sprint checkboxes">
+        ${(sprint.weeklyCheckboxes || []).map(renderSprintCheckbox).join("")}
+      </div>
+      <p class="sprint-count">Activity logs this sprint: <strong>${numberFormat(sprint.activeActivityCount)}</strong></p>
+      ${renderSprintSignals(sprint)}
+    </section>
+
+    ${renderSprintFocus(focus)}
+
+    <section class="sprint-card okr-card">
+      <div class="sprint-card-head">
+        <div>
+          <span class="sprint-kicker">${escapeHtml(okr.quarter || sprint.quarter || "OKRs")}</span>
+          <h2>${escapeHtml(okr.title || "Personal OKRs")}</h2>
+        </div>
+        ${renderObsidianNoteLink(okr.path, "Open OKRs")}
+      </div>
+      <div class="okr-objectives">
+        ${(okr.objectives || []).map(renderOkrObjective).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderSprintFocus(focus) {
+  const hasFocus = Boolean(focus?.available && focus.title);
+  return `
+    <section class="sprint-card focus-card">
+      <div class="sprint-card-head">
+        <div>
+          <span class="sprint-kicker">Focus</span>
+          <h2>${hasFocus ? escapeHtml(focus.title) : "No active focus"}</h2>
+        </div>
+        <div class="sprint-actions">
+          ${hasFocus ? `<button class="note-link-button" type="button" data-focus-chat>Open in chat</button>` : ""}
+          ${hasFocus && focus.ideaPath ? renderObsidianNoteLink(focus.ideaPath, "Open idea") : ""}
+          ${renderObsidianNoteLink(focus?.ledgerPath || "", "Open ledger")}
+        </div>
+      </div>
+      ${hasFocus ? `
+        <div class="sprint-priority focus-priority">
+          <span>Active idea slot</span>
+          <strong>${escapeHtml(focus.doneLooksLike || "Define the finish line in the idea ledger.")}</strong>
+          ${focus.started ? `<small>Started ${escapeHtml(focus.started)}</small>` : ""}
+        </div>
+      ` : `<p class="quiet-line">Add one idea under Active in the idea ledger.</p>`}
+    </section>
+  `;
+}
+
+function renderSprintSignals(sprint) {
+  const signals = [];
+  if (sprint.view === "last" && sprint.review) {
+    if (sprint.review.uncheckedWeekCount) signals.push(`${numberFormat(sprint.review.uncheckedWeekCount)} unchecked week${sprint.review.uncheckedWeekCount === 1 ? "" : "s"}`);
+    if (sprint.review.missedActivityWeekCount) signals.push(`${numberFormat(sprint.review.missedActivityWeekCount)} missed activity target${sprint.review.missedActivityWeekCount === 1 ? "" : "s"}`);
+    if (sprint.review.incompleteActiveKr) signals.push(`Active KR still ${sprint.review.activeKrStatus || "incomplete"}`);
+  }
+  if (sprint.view === "next" && sprint.preview) {
+    const starts = sprint.preview.startsInDays;
+    if (starts !== null && starts !== undefined) {
+      signals.push(starts > 0 ? `Starts in ${numberFormat(starts)} day${starts === 1 ? "" : "s"}` : "Starts today");
+    }
+    if (sprint.preview.plannedWeekCount) signals.push(`${numberFormat(sprint.preview.plannedWeekCount)} planned week${sprint.preview.plannedWeekCount === 1 ? "" : "s"}`);
+  }
+  if (!signals.length) return "";
+  return `
+    <div class="sprint-signals" aria-label="Sprint signals">
+      ${signals.map((signal) => `<span>${escapeHtml(signal)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function renderSprintViewTabs(sprint) {
+  const views = sprint.availableViews || [];
+  if (views.length <= 1) return "";
+  return `
+    <div class="sprint-view-tabs" role="tablist" aria-label="Sprint views">
+      ${views.map((item) => `
+        <button
+          type="button"
+          role="tab"
+          class="${item.view === sprint.view ? "is-active" : ""}"
+          data-sprint-view="${escapeHtml(item.view)}"
+          aria-selected="${item.view === sprint.view}"
+          title="${escapeHtml(formatSprintRange(item.start, item.end))}"
+        >
+          ${escapeHtml(item.label)}
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderSprintCheckbox(item) {
+  return `
+    <label class="sprint-checkbox-row ${item.isCurrentWeek ? "is-current-week" : ""}">
+      <input type="checkbox" data-sprint-week="${escapeHtml(item.week)}" ${item.done ? "checked" : ""} />
+      <span>${escapeHtml(item.label)}</span>
+      ${item.isCurrentWeek ? `<strong>Current week</strong>` : ""}
+    </label>
+  `;
+}
+
+function renderOkrObjective(objective) {
+  const isOpen = state.sprintOpenObjectives.has(String(objective.id));
+  return `
+    <article class="okr-objective ${objective.active ? "is-active" : ""}">
+      <button class="okr-objective-head" type="button" data-okr-objective="${escapeHtml(objective.id)}" aria-expanded="${isOpen}">
+        <span>${isOpen ? "▼" : "▶"}</span>
+        <strong>Obj ${escapeHtml(objective.id)}: ${escapeHtml(objective.title)}</strong>
+      </button>
+      ${isOpen ? `<div class="okr-kr-list">${(objective.keyResults || []).map(renderOkrKrRow).join("")}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderOkrKrRow(kr) {
+  const expanded = state.sprintExpandedKr === kr.id;
+  const okrPath = state.personalSprint?.okr?.path || "";
+  return `
+    <article class="okr-kr-row ${kr.isActive ? "is-active" : ""}">
+      <button class="okr-kr-main" type="button" data-okr-kr="${escapeHtml(kr.id)}" aria-expanded="${expanded}">
+        <span class="okr-kr-id">KR ${escapeHtml(kr.id)}</span>
+        <span class="okr-kr-description">${escapeHtml(kr.description)}</span>
+        ${renderKrProgress(kr)}
+      </button>
+      ${expanded ? `
+        <div class="okr-kr-detail">
+          <p>${escapeHtml(kr.description)}</p>
+          <span>${escapeHtml(kr.type || "kr")}${kr.activity ? ` · [activity:: ${escapeHtml(kr.activity)}]` : ""}${kr.domain ? ` · ${escapeHtml(kr.domain)}` : ""}</span>
+          <div class="okr-kr-actions">
+            <button class="note-link-button" type="button" data-kr-chat="${escapeHtml(kr.id)}">Open in chat</button>
+            ${renderObsidianNoteLink(okrPath, "Open OKRs")}
+          </div>
+        </div>
+      ` : ""}
+    </article>
+  `;
+}
+
+function renderKrProgress(kr) {
+  const progress = kr.progress || {};
+  if (progress.kind === "frequency") {
+    return `
+      <span class="okr-progress">
+        <span>${escapeHtml(progress.label)}</span>
+        <span class="dot-progress" aria-hidden="true">${(progress.dots || []).map((done) => `<i class="${done ? "is-filled" : ""}"></i>`).join("")}</span>
+      </span>
+    `;
+  }
+  if (progress.kind === "milestone") {
+    return `<span class="okr-progress milestone-progress">${progress.done ? "✓ Done" : "□ Not done"}</span>`;
+  }
+  return `<span class="okr-progress">${escapeHtml(progress.label || "0 logs")}</span>`;
+}
+
+function handleSprintClick(event) {
+  const sprintViewButton = event.target.closest("[data-sprint-view]");
+  if (sprintViewButton) {
+    event.preventDefault();
+    const nextView = sprintViewButton.dataset.sprintView || "";
+    if (nextView && nextView !== state.personalSprintView) {
+      state.personalSprintView = nextView;
+      loadPersonalSprint(nextView);
+    }
+    return;
+  }
+
+  const sprintChatButton = event.target.closest("[data-sprint-chat]");
+  if (sprintChatButton) {
+    event.preventDefault();
+    openSprintInChat();
+    return;
+  }
+
+  const focusChatButton = event.target.closest("[data-focus-chat]");
+  if (focusChatButton) {
+    event.preventDefault();
+    openFocusInChat();
+    return;
+  }
+
+  const krChatButton = event.target.closest("[data-kr-chat]");
+  if (krChatButton) {
+    event.preventDefault();
+    openKrInChat(krChatButton.dataset.krChat || "");
+    return;
+  }
+
+  const noteButton = event.target.closest("[data-open-note]");
+  if (noteButton) {
+    event.preventDefault();
+    openObsidianNote(noteButton.dataset.openNote || "");
+    return;
+  }
+
+  const objectiveButton = event.target.closest("[data-okr-objective]");
+  if (objectiveButton) {
+    const id = String(objectiveButton.dataset.okrObjective || "");
+    if (state.sprintOpenObjectives.has(id)) {
+      state.sprintOpenObjectives.delete(id);
+    } else {
+      state.sprintOpenObjectives.add(id);
+    }
+    renderPersonalSprint();
+    return;
+  }
+
+  const krButton = event.target.closest("[data-okr-kr]");
+  if (krButton) {
+    const id = krButton.dataset.okrKr || "";
+    state.sprintExpandedKr = state.sprintExpandedKr === id ? "" : id;
+    renderPersonalSprint();
+  }
+}
+
+function openSprintInChat() {
+  const sprint = state.personalSprint?.sprint;
+  if (!sprint) return;
+  const sprintLabel = getSprintViewLabel(sprint.view).toLowerCase();
+  const message = [
+    `Let's work through my ${sprintLabel} personal sprint.`,
+    `Sprint: ${formatSprintRange(sprint.start, sprint.end)}`,
+    `Priority KR ${sprint.activeKr}: ${sprint.activeKrDescription}`,
+    `Activity logs this sprint: ${sprint.activeActivityCount}`
+  ].join("\n");
+  startChatWithDraft(message, [{
+    kind: "file",
+    title: "Sprint Plan",
+    name: "Sprint Plan",
+    token: "sprint-plan",
+    path: sprint.path
+  }]);
+}
+
+function openFocusInChat() {
+  const focus = state.personalSprint?.focus;
+  if (!focus?.available) return;
+  const message = [
+    `Let's focus on my active idea: ${focus.title}.`,
+    focus.doneLooksLike ? `Done looks like: ${focus.doneLooksLike}` : "",
+    focus.started ? `Started: ${focus.started}` : ""
+  ].filter(Boolean).join("\n");
+  startChatWithDraft(message, [
+    focus.ideaPath ? {
+      kind: "file",
+      title: focus.title,
+      name: focus.title,
+      token: slugifyUiToken(focus.title || "active-focus"),
+      path: focus.ideaPath
+    } : null,
+    focus.ledgerPath ? {
+      kind: "file",
+      title: "Idea Ledger",
+      name: "Idea Ledger",
+      token: "idea-ledger",
+      path: focus.ledgerPath
+    } : null
+  ].filter(Boolean));
+}
+
+function getSprintViewLabel(view) {
+  const item = (state.personalSprint?.sprint?.availableViews || []).find((candidate) => candidate.view === view);
+  return item?.label || "Current";
+}
+
+function openKrInChat(krId) {
+  const sprint = state.personalSprint?.sprint;
+  const okr = state.personalSprint?.okr;
+  const kr = (okr?.objectives || []).flatMap((objective) => objective.keyResults || []).find((item) => item.id === krId);
+  if (!kr || !okr) return;
+  const message = [
+    `Let's work on KR ${kr.id}.`,
+    kr.description,
+    `Current progress: ${kr.progress?.label || "No progress label"}`,
+    kr.activity ? `Activity tag: [activity:: ${kr.activity}]` : ""
+  ].filter(Boolean).join("\n");
+  startChatWithDraft(message, [
+    {
+      kind: "file",
+      title: "Personal OKRs",
+      name: "Personal OKRs",
+      token: "personal-okrs",
+      path: okr.path
+    },
+    sprint?.path ? {
+      kind: "file",
+      title: "Sprint Plan",
+      name: "Sprint Plan",
+      token: "sprint-plan",
+      path: sprint.path
+    } : null
+  ].filter(Boolean));
+}
+
+async function handleSprintChange(event) {
+  const checkbox = event.target.closest("[data-sprint-week]");
+  if (!checkbox) return;
+  checkbox.disabled = true;
+  try {
+    state.personalSprint = await postJson("/api/personal-sprint/checkbox", {
+      week: checkbox.dataset.sprintWeek,
+      done: checkbox.checked,
+      view: state.personalSprintView
+    });
+    state.personalSprintView = state.personalSprint?.sprint?.view || state.personalSprintView;
+    renderPersonalSprint();
+    flashHelper("Sprint checkbox updated.");
+  } catch (error) {
+    checkbox.checked = !checkbox.checked;
+    checkbox.disabled = false;
+    flashHelper(error.message);
+  }
+}
+
+function renderSprintLoading() {
+  if (!sprintContent) return;
+  sprintContent.innerHTML = `<div class="empty-state"><p class="empty-title">Loading sprint...</p></div>`;
+}
+
+function renderSprintError(message) {
+  if (!sprintContent) return;
+  sprintContent.innerHTML = `
+    <div class="empty-state">
+      <p class="empty-title">Sprint unavailable.</p>
+      <p>${escapeHtml(message)}</p>
+    </div>
+  `;
+}
+
+function formatSprintRange(start, end) {
+  const left = formatShortDate(start);
+  const right = formatShortDate(end);
+  return left && right ? `${left} – ${right}` : "No active window";
+}
+
+function formatShortDate(value) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(`${value}T00:00:00`));
 }
 
 function renderIndexMessage(message) {
@@ -3081,6 +4192,14 @@ function showUndoToast(taskId) {
     <button type="button" data-undo-task="${escapeHtml(taskId)}">Undo</button>
   `;
   state.toastTimer = window.setTimeout(hideToast, TASK_UNDO_TOAST_MS);
+}
+
+function showToast(message, { duration = 1800 } = {}) {
+  if (!actionToast || !message) return;
+  window.clearTimeout(state.toastTimer);
+  actionToast.hidden = false;
+  actionToast.innerHTML = `<span>${escapeHtml(message)}</span>`;
+  state.toastTimer = window.setTimeout(hideToast, duration);
 }
 
 function hideToast() {
