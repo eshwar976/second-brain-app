@@ -54,6 +54,31 @@ CHAT_SESSIONS_DIR=3.Resources/gpt/sessions
 
 Set `APP_SECRET` when binding to `0.0.0.0`. When present, write actions require the passcode in the web app before they can append, edit, triage, toggle, or rebuild.
 
+## GitHub OAuth
+
+Replace the shared-secret passcode with GitHub OAuth for browser-based write access.
+
+### Setup
+
+1. Go to https://github.com/settings/developers and create a **New OAuth App**.
+2. Set **Homepage URL** to `http://127.0.0.1:3030` (or your host/port).
+3. Set **Authorization callback URL** to `http://127.0.0.1:3030/auth/callback`.
+4. Copy the Client ID and generate a Client Secret.
+
+### .env
+
+```env
+GITHUB_CLIENT_ID=your_client_id
+GITHUB_CLIENT_SECRET=your_client_secret
+SESSION_SECRET=a_random_secret_key
+GITHUB_ALLOWED_LOGINS=your_github_login
+SESSION_MAX_AGE=86400
+```
+
+All four (`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SESSION_SECRET`, `GITHUB_ALLOWED_LOGINS`) must be set to enable GitHub OAuth. `GITHUB_ALLOWED_LOGINS` is a comma-separated allowlist; only those GitHub accounts can open the vault app. When enabled, the app redirects unauthenticated browser users to GitHub's authorization page, then creates an HttpOnly session cookie on success.
+
+`APP_SECRET` still works as a fallback when GitHub is not configured, or for CLI/curl usage where a browser redirect is impractical.
+
 Set `DEEPSEEK_API_KEY` to enable Chat. Chat retrieves a small set of indexed vault snippets and sends those snippets, the current question, and short browser-session history to the DeepSeek API.
 
 Chat sessions are saved as Markdown under `CHAT_SESSIONS_DIR`, which defaults to `3.Resources/gpt/sessions`. The browser remembers the active session path and reloads it after refresh.

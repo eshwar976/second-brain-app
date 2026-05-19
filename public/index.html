@@ -21,9 +21,28 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=47" />
   </head>
   <body>
+    <div class="auth-gate" id="auth-gate">
+      <div class="auth-gate-body">
+        <div id="auth-gate-github" hidden>
+          <h1>Second Brain</h1>
+          <p>Sign in with GitHub to access your vault.</p>
+          <button class="primary-button" id="auth-gate-login" type="button">Login with GitHub</button>
+        </div>
+        <div id="auth-gate-passcode" hidden>
+          <h1>Second Brain</h1>
+          <p>Enter the app passcode to unlock.</p>
+          <label class="auth-gate-field" for="auth-gate-secret">
+            <span>Passcode</span>
+            <input id="auth-gate-secret" type="password" autocomplete="current-password" />
+          </label>
+          <p class="auth-gate-error" id="auth-gate-error" hidden></p>
+          <button class="primary-button" id="auth-gate-submit" type="button">Unlock</button>
+        </div>
+      </div>
+    </div>
     <svg class="icon-sprite" aria-hidden="true">
       <symbol id="icon-log" viewBox="0 0 24 24">
         <circle cx="12" cy="12" r="8"></circle>
@@ -67,7 +86,7 @@
         <path d="M4 13h7v6H4Z"></path>
       </symbol>
     </svg>
-    <main class="app-shell">
+    <main class="app-shell" hidden>
       <section class="capture-screen" aria-label="Capture">
         <nav class="app-nav" aria-label="Primary">
           <button class="nav-item is-active" type="button" data-tab="capture" aria-current="page">
@@ -160,16 +179,9 @@
           <form class="composer chat-composer" id="chat-form">
             <div class="chat-composer-tools">
               <button class="session-button" id="chat-new-session" type="button">New</button>
-              <div class="chat-actions-menu" id="chat-actions-menu">
-                <button class="session-button chat-actions-trigger" id="chat-actions-trigger" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Session actions">
-                  <span>Actions</span>
-                </button>
-                <div class="chat-actions-popover" id="chat-actions-popover" role="menu" hidden>
-                  <button type="button" id="chat-save-summary" role="menuitem">Save summary</button>
-                  <button type="button" id="chat-extract-todos" role="menuitem">Extract todos</button>
-                  <button type="button" id="chat-create-note" role="menuitem">Create note</button>
-                </div>
-              </div>
+              <button class="session-button chat-actions-trigger" id="chat-actions-trigger" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Session actions">
+                <span>Actions</span>
+              </button>
               <button class="deep-work-toggle" id="deep-work-toggle" type="button" aria-pressed="false">Deep Work</button>
               <button class="thinking-toggle" type="button" data-chat-thinking="enabled" aria-pressed="false">
                 <span>Thinking</span>
@@ -318,11 +330,11 @@
                 <h2>Recent notes</h2>
                 <div class="mini-list" id="dashboard-recent-notes"></div>
               </section>
-              <section class="dashboard-section dashboard-section-wide settings-section">
-                <div class="section-heading-row">
-                  <h2>Settings</h2>
+              <details class="dashboard-section dashboard-section-wide settings-section">
+                <summary class="settings-summary">
+                  <span>Settings</span>
                   <span id="theme-status">System</span>
-                </div>
+                </summary>
                 <p class="warning-line" id="auth-warning" hidden></p>
                 <div class="setting-row">
                   <div>
@@ -335,8 +347,18 @@
                     <button class="theme-option" type="button" data-theme-choice="dark">Dark</button>
                   </div>
                 </div>
+                <div class="setting-row" id="auth-row" hidden>
+                  <div>
+                    <p class="setting-title">Account</p>
+                    <p class="setting-description" id="auth-description">Not authenticated</p>
+                  </div>
+                  <div id="auth-controls">
+                    <button class="primary-button" id="settings-login-button" type="button" hidden>Login with GitHub</button>
+                    <button class="secondary-button" id="settings-logout-button" type="button" hidden>Logout</button>
+                  </div>
+                </div>
                 <div id="settings-details"></div>
-              </section>
+              </details>
             </div>
 
             <form class="search-form" id="search-form">
@@ -355,6 +377,29 @@
         </section>
       </section>
     </main>
+
+    <div class="todo-sheet chat-actions-sheet" id="chat-actions-sheet" hidden>
+      <button class="sheet-backdrop" type="button" aria-label="Close chat actions" data-chat-actions-cancel></button>
+      <section class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="chat-actions-sheet-title">
+        <div class="sheet-header">
+          <div>
+            <p class="eyebrow">chat</p>
+            <h2 id="chat-actions-sheet-title">Actions</h2>
+          </div>
+          <button class="sheet-close" type="button" aria-label="Close chat actions" data-chat-actions-cancel>×</button>
+        </div>
+
+        <div class="chat-action-list">
+          <button class="secondary-button" type="button" id="chat-save-summary">Save summary</button>
+          <button class="secondary-button" type="button" id="chat-extract-todos">Extract todos</button>
+          <button class="secondary-button" type="button" id="chat-create-note">Create note</button>
+        </div>
+
+        <div class="sheet-actions">
+          <button class="secondary-button" type="button" data-chat-actions-cancel>Cancel</button>
+        </div>
+      </section>
+    </div>
 
     <div class="todo-sheet" id="todo-sheet" hidden>
       <button class="sheet-backdrop" type="button" aria-label="Close todo details" data-todo-cancel></button>
@@ -423,26 +468,34 @@
     </div>
 
     <div class="todo-sheet" id="auth-sheet" hidden>
-      <button class="sheet-backdrop" type="button" aria-label="Close passcode" data-auth-cancel></button>
+      <button class="sheet-backdrop" type="button" aria-label="Close auth" data-auth-cancel></button>
       <section class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="auth-sheet-title">
         <div class="sheet-header">
           <div>
             <p class="eyebrow">local security</p>
-            <h2 id="auth-sheet-title">App passcode</h2>
+            <h2 id="auth-sheet-title">Authentication</h2>
           </div>
-          <button class="sheet-close" type="button" aria-label="Close passcode" data-auth-cancel>×</button>
+          <button class="sheet-close" type="button" aria-label="Close auth" data-auth-cancel>×</button>
         </div>
 
-        <label class="due-field" for="auth-secret">
-          <span>Passcode</span>
-          <input id="auth-secret" type="password" autocomplete="current-password" />
-        </label>
+        <div class="auth-body" id="auth-body">
+          <div id="auth-passcode-fields" hidden>
+            <label class="due-field" for="auth-secret">
+              <span>Passcode</span>
+              <input id="auth-secret" type="password" autocomplete="current-password" />
+            </label>
+            <p class="quiet-line">Stored only in this browser and sent with write actions.</p>
+          </div>
+          <div id="auth-github-info" hidden>
+            <p id="auth-user-info" class="auth-user-info"></p>
+          </div>
+        </div>
 
-        <p class="quiet-line">Stored only in this browser and sent with write actions.</p>
-
-        <div class="sheet-actions">
+        <div class="sheet-actions" id="auth-actions">
           <button class="secondary-button" type="button" data-auth-cancel>Cancel</button>
-          <button class="primary-button" id="auth-confirm" type="button">Save passcode</button>
+          <button class="primary-button" id="auth-confirm" type="button" hidden>Save passcode</button>
+          <button class="primary-button" id="auth-login-button" type="button" hidden>Login with GitHub</button>
+          <button class="secondary-button" id="auth-logout-button" type="button" hidden>Logout</button>
         </div>
       </section>
     </div>
@@ -504,6 +557,6 @@
 
     <div class="toast" id="action-toast" role="status" aria-live="polite" hidden></div>
 
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js?v=47" type="module"></script>
   </body>
 </html>

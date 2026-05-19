@@ -54,6 +54,9 @@ const state = {
   deepWorkSessionPath: "",
   chatSession: null,
   chatSessions: [],
+  chatSessionsLoaded: false,
+  chatSessionsLoading: false,
+  chatSessionsRequest: null,
   chatSessionPickerOpen: false,
   chatSessionQuery: "",
   captureSwipe: null,
@@ -93,7 +96,6 @@ const state = {
   chatSummarySaving: false,
   chatTodosExtracting: false,
   chatNoteCreating: false,
-  chatActionsOpen: false,
   pendingTriageTask: null,
   pendingEdit: null,
   todoSheetMode: "capture",
@@ -104,11 +106,13 @@ const state = {
   lastCaptureKey: "",
   lastCaptureAt: 0,
   authSecret: "",
+  authUser: null,
   themePreference: "system",
   toastTimer: null
 };
 
 const timeline = document.querySelector("#timeline");
+const captureScreen = document.querySelector(".capture-screen");
 const form = document.querySelector("#capture-form");
 const textarea = document.querySelector("#capture-text");
 const helperLine = document.querySelector("#helper-line");
@@ -130,9 +134,9 @@ const chatSendButton = document.querySelector("#chat-send-button");
 const chatHelperLine = document.querySelector("#chat-helper-line");
 const chatStatus = document.querySelector("#chat-status");
 const chatThinkingButtons = Array.from(document.querySelectorAll("[data-chat-thinking]"));
-const chatActionsMenu = document.querySelector("#chat-actions-menu");
 const chatActionsTrigger = document.querySelector("#chat-actions-trigger");
-const chatActionsPopover = document.querySelector("#chat-actions-popover");
+const chatActionsSheet = document.querySelector("#chat-actions-sheet");
+const chatActionsCancelButtons = Array.from(document.querySelectorAll("[data-chat-actions-cancel]"));
 const chatSaveSummaryButton = document.querySelector("#chat-save-summary");
 const chatExtractTodosButton = document.querySelector("#chat-extract-todos");
 const chatCreateNoteButton = document.querySelector("#chat-create-note");
@@ -210,9 +214,108 @@ async function init() {
   wireInteractions();
   registerServiceWorker();
   await loadConfig();
+  await checkAuth();
+  const gated = await gateAuth();
+  if (!gated) return;
   await loadStoredChatSession();
-  await Promise.all([loadCaptures(), loadIndexStatus()]);
+  await Promise.all([
+    loadCaptures(),
+    loadIndexStatus(),
+    loadChatSessionsCache().catch(() => {})
+  ]);
   textarea.focus();
+}
+
+function showApp() {
+  const gate = document.querySelector("#auth-gate");
+  const shell = document.querySelector(".app-shell");
+  if (gate) gate.hidden = true;
+  if (shell) shell.hidden = false;
+  document.body.classList.remove("gate-open");
+}
+
+async function gateAuth() {
+  if (!state.config?.authRequired) { showApp(); return true; }
+  const gate = document.querySelector("#auth-gate");
+  if (!gate) { showApp(); return true; }
+
+  if (state.authUser?.authenticated) {
+    showApp();
+    return true;
+  }
+
+  if (state.authSecret && !state.config.githubAvailable) {
+    showApp();
+    return true;
+  }
+
+  document.body.classList.add("gate-open");
+
+  if (state.config.githubAvailable) {
+    renderGate("github");
+    document.querySelector("#auth-gate-login")?.addEventListener("click", () => {
+      window.location.href = "/auth/login";
+    });
+    return new Promise(() => {});
+  }
+
+  renderGate("passcode");
+  return new Promise((resolve) => {
+    const input = document.querySelector("#auth-gate-secret");
+    const button = document.querySelector("#auth-gate-submit");
+    const errorEl = document.querySelector("#auth-gate-error");
+
+    const submit = async () => {
+      const secret = input?.value?.trim() || "";
+      if (!secret) return;
+      try {
+        const res = await fetch("/api/auth/check", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Second-Brain-Secret": secret
+          }
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Invalid passcode.");
+        state.authSecret = secret;
+        try {
+          window.localStorage.setItem(APP_SECRET_STORAGE_KEY, secret);
+        } catch {}
+        showApp();
+        renderAuthState();
+        resolve(true);
+      } catch (error) {
+        if (errorEl) {
+          errorEl.textContent = error.message;
+          errorEl.hidden = false;
+        }
+        if (input) {
+          input.value = "";
+          input.focus();
+        }
+        state.authSecret = "";
+      }
+    };
+
+    button?.addEventListener("click", submit);
+    input?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submit();
+    });
+    setTimeout(() => input?.focus(), 100);
+  });
+}
+
+function renderGate(mode) {
+  const githubBlock = document.querySelector("#auth-gate-github");
+  const passcodeBlock = document.querySelector("#auth-gate-passcode");
+  if (mode === "github") {
+    if (githubBlock) githubBlock.hidden = false;
+    if (passcodeBlock) passcodeBlock.hidden = true;
+  } else {
+    if (githubBlock) githubBlock.hidden = true;
+    if (passcodeBlock) passcodeBlock.hidden = false;
+  }
 }
 
 function wireInteractions() {
@@ -231,8 +334,12 @@ function wireInteractions() {
   });
 
   textarea.addEventListener("input", () => {
+    setComposerFocus(true);
     autoResize(textarea);
   });
+  textarea.addEventListener("pointerdown", () => setComposerFocus(true));
+  textarea.addEventListener("focus", () => setComposerFocus(true));
+  textarea.addEventListener("blur", () => window.setTimeout(() => setComposerFocus(false), 80));
 
   editText?.addEventListener("input", () => {
     autoResize(editText);
@@ -246,10 +353,14 @@ function wireInteractions() {
   });
 
   chatText?.addEventListener("input", () => {
+    setComposerFocus(true);
     autoResize(chatText);
     updateChatSuggestions();
     scheduleSuggestedChatContext();
   });
+  chatText?.addEventListener("pointerdown", () => setComposerFocus(true));
+  chatText?.addEventListener("focus", () => setComposerFocus(true));
+  chatText?.addEventListener("blur", () => window.setTimeout(() => setComposerFocus(false), 80));
 
   chatText?.addEventListener("click", updateChatSuggestions);
   chatText?.addEventListener("blur", () => {
@@ -271,22 +382,26 @@ function wireInteractions() {
   });
 
   chatActionsTrigger?.addEventListener("click", () => {
-    setChatActionsOpen(!state.chatActionsOpen);
+    openChatActionsSheet();
   });
 
   chatSaveSummaryButton?.addEventListener("click", async () => {
-    setChatActionsOpen(false);
+    closeChatActionsSheet();
     await saveCurrentChatSessionSummary();
   });
 
   chatExtractTodosButton?.addEventListener("click", async () => {
-    setChatActionsOpen(false);
+    closeChatActionsSheet();
     await extractCurrentChatTodos();
   });
 
   chatCreateNoteButton?.addEventListener("click", async () => {
-    setChatActionsOpen(false);
+    closeChatActionsSheet();
     await createCurrentChatStructuredNote();
+  });
+
+  chatActionsCancelButtons.forEach((button) => {
+    button.addEventListener("click", closeChatActionsSheet);
   });
 
   deepWorkToggle?.addEventListener("click", () => {
@@ -418,9 +533,21 @@ function wireInteractions() {
     }
   });
 
+  const settingsLoginButton = document.querySelector("#settings-login-button");
+  settingsLoginButton?.addEventListener("click", login);
+
+  const settingsLogoutButton = document.querySelector("#settings-logout-button");
+  settingsLogoutButton?.addEventListener("click", logout);
+
+  const authLoginButton = document.querySelector("#auth-login-button");
+  authLoginButton?.addEventListener("click", login);
+
+  const authLogoutButton = document.querySelector("#auth-logout-button");
+  authLogoutButton?.addEventListener("click", logout);
+
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.chatActionsOpen) {
-      setChatActionsOpen(false);
+    if (event.key === "Escape" && chatActionsSheet && !chatActionsSheet.hidden) {
+      closeChatActionsSheet();
       return;
     }
     if (event.key === "Escape" && state.chatSessionPickerOpen) {
@@ -441,12 +568,6 @@ function wireInteractions() {
     }
     if (event.key === "Escape" && todoSheet && !todoSheet.hidden) {
       closeTodoSheet();
-    }
-  });
-
-  window.addEventListener("click", (event) => {
-    if (state.chatActionsOpen && chatActionsMenu && !chatActionsMenu.contains(event.target)) {
-      setChatActionsOpen(false);
     }
   });
 
@@ -537,6 +658,13 @@ function wireInteractions() {
   });
 }
 
+function setComposerFocus(isFocused) {
+  if (!captureScreen) return;
+  const active = document.activeElement;
+  const composerStillFocused = active === textarea || active === chatText;
+  captureScreen.classList.toggle("is-composing", Boolean(isFocused || composerStillFocused));
+}
+
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
   navigator.serviceWorker.register("/sw.js").catch(() => {
@@ -550,6 +678,7 @@ function initAuth() {
   } catch {
     state.authSecret = "";
   }
+  state.authUser = null;
 }
 
 function initDeepWork() {
@@ -597,20 +726,115 @@ function saveAuthSecret() {
 }
 
 function openAuthSheet() {
-  if (!authSheet || !authInput) return;
-  authInput.value = state.authSecret || "";
+  if (!authSheet) return;
   authSheet.hidden = false;
   document.body.classList.add("sheet-open");
-  requestAnimationFrame(() => {
-    authInput.focus();
-    authInput.select();
-  });
+
+  const passcodeFields = document.querySelector("#auth-passcode-fields");
+  const githubInfo = document.querySelector("#auth-github-info");
+  const confirmBtn = document.querySelector("#auth-confirm");
+  const loginBtn = document.querySelector("#auth-login-button");
+  const logoutBtn = document.querySelector("#auth-logout-button");
+  const userInfo = document.querySelector("#auth-user-info");
+
+  if (state.config?.githubAvailable) {
+    if (passcodeFields) passcodeFields.hidden = true;
+    if (githubInfo) githubInfo.hidden = false;
+    if (confirmBtn) confirmBtn.hidden = true;
+    if (loginBtn) {
+      loginBtn.hidden = false;
+      loginBtn.textContent = state.authUser?.authenticated ? "Re-authenticate" : "Login with GitHub";
+    }
+    if (logoutBtn) logoutBtn.hidden = !state.authUser?.authenticated;
+    if (userInfo) {
+      userInfo.textContent = state.authUser?.authenticated
+        ? `Logged in as ${state.authUser.name || state.authUser.login}`
+        : "You need to authenticate to write to the vault.";
+    }
+    requestAnimationFrame(() => loginBtn?.focus());
+    return;
+  }
+
+  if (passcodeFields) passcodeFields.hidden = false;
+  if (githubInfo) githubInfo.hidden = true;
+  if (confirmBtn) confirmBtn.hidden = false;
+  if (loginBtn) loginBtn.hidden = true;
+  if (logoutBtn) logoutBtn.hidden = true;
+  const authInput = document.querySelector("#auth-secret");
+  if (authInput) {
+    authInput.value = state.authSecret || "";
+    requestAnimationFrame(() => {
+      authInput.focus();
+      authInput.select();
+    });
+  }
 }
 
 function closeAuthSheet() {
   if (!authSheet) return;
   authSheet.hidden = true;
   document.body.classList.remove("sheet-open");
+}
+
+async function checkAuth() {
+  state.authUser = null;
+  try {
+    const data = await getJson("/api/auth/me");
+    if (data?.authenticated) {
+      state.authUser = data;
+      renderAuthState();
+      return;
+    }
+  } catch {
+    // Not authenticated — fall through
+  }
+  renderAuthState();
+}
+
+function renderAuthState() {
+  const isLoggedIn = Boolean(state.authUser?.authenticated);
+  const githubAvailable = Boolean(state.config?.githubAvailable);
+
+  const settingsLoginButton = document.querySelector("#settings-login-button");
+  const settingsLogoutButton = document.querySelector("#settings-logout-button");
+  const authRow = document.querySelector("#auth-row");
+  const authDescription = document.querySelector("#auth-description");
+
+  if (authRow) authRow.hidden = !(githubAvailable || state.authUser);
+
+  if (settingsLoginButton) {
+    settingsLoginButton.hidden = !githubAvailable || isLoggedIn;
+    settingsLoginButton.disabled = false;
+  }
+  if (settingsLogoutButton) {
+    settingsLogoutButton.hidden = !isLoggedIn;
+    settingsLogoutButton.disabled = false;
+  }
+  if (authDescription) {
+    if (isLoggedIn) {
+      authDescription.textContent = `Logged in as ${state.authUser.name || state.authUser.login}`;
+    } else if (githubAvailable) {
+      authDescription.textContent = "Login with GitHub to enable write access.";
+    } else {
+      authDescription.textContent = "Write auth via app passcode.";
+    }
+  }
+}
+
+async function login() {
+  if (!state.config?.githubAvailable) return;
+  window.location.href = "/auth/login";
+}
+
+async function logout() {
+  try {
+    await postJson("/auth/logout", {});
+    state.authUser = null;
+    renderAuthState();
+    flashHelper("Logged out.");
+  } catch (error) {
+    flashHelper(error.message);
+  }
 }
 
 function initTheme() {
@@ -682,6 +906,9 @@ function renderThemeControls() {
 }
 
 function setActiveTab(tab) {
+  const gate = document.querySelector("#auth-gate");
+  if (gate && !gate.hidden && state.config?.authRequired) return;
+
   navItems.forEach((item) => {
     const isActive = item.dataset.tab === tab;
     item.classList.toggle("is-active", isActive);
@@ -986,14 +1213,30 @@ async function toggleChatSessionPicker() {
     return;
   }
   state.chatSessionPickerOpen = true;
-  renderChatSessionPicker({ loading: true });
+  const canRenderFromCache = state.chatSessionsLoaded || state.chatSessions.length > 0;
+  renderChatSessionPicker({ loading: !canRenderFromCache });
   try {
+    await loadChatSessionsCache();
+    if (state.chatSessionPickerOpen) renderChatSessionResults();
+  } catch (error) {
+    if (state.chatSessionPickerOpen) renderChatSessionResults({ error: error.message });
+  }
+}
+
+async function loadChatSessionsCache() {
+  if (state.chatSessionsRequest) return state.chatSessionsRequest;
+  state.chatSessionsLoading = true;
+  state.chatSessionsRequest = (async () => {
     const data = await protectedGetJson("/api/chat/sessions?limit=30");
     state.chatSessions = data.sessions || [];
+    state.chatSessionsLoaded = true;
     upsertChatSession(state.chatSession);
-    renderChatSessionPicker();
-  } catch (error) {
-    renderChatSessionPicker({ error: error.message });
+  })();
+  try {
+    await state.chatSessionsRequest;
+  } finally {
+    state.chatSessionsLoading = false;
+    state.chatSessionsRequest = null;
   }
 }
 
@@ -1110,10 +1353,10 @@ function groupChatSessions(sessions) {
   ].filter((group) => group.sessions.length);
 }
 
-function renderChatSessionResults() {
+function renderChatSessionResults(options = {}) {
   const results = chatSessionPopover?.querySelector("[data-session-results]");
   if (!results) return;
-  results.innerHTML = renderChatSessionListMarkup();
+  results.innerHTML = renderChatSessionListMarkup(options);
 }
 
 function renderChatSessionOption(session) {
@@ -1277,8 +1520,8 @@ function renderChatSessionActionsState() {
   const hasAssistantText = state.chatMessages.some((message) => message.role === "assistant" && !message.isPending && !message.isError && String(message.content || "").trim());
   const disabled = state.chatSummarySaving || state.chatTodosExtracting || state.chatNoteCreating || !hasAssistantText;
   if (chatActionsTrigger) {
-    chatActionsTrigger.disabled = disabled;
-    chatActionsTrigger.setAttribute("aria-expanded", String(state.chatActionsOpen));
+    chatActionsTrigger.disabled = false;
+    chatActionsTrigger.setAttribute("aria-expanded", String(Boolean(chatActionsSheet && !chatActionsSheet.hidden)));
   }
   if (chatSaveSummaryButton) {
     chatSaveSummaryButton.disabled = disabled;
@@ -1292,13 +1535,17 @@ function renderChatSessionActionsState() {
     chatCreateNoteButton.disabled = disabled;
     chatCreateNoteButton.textContent = state.chatNoteCreating ? "Creating..." : "Create note";
   }
-  if (disabled && state.chatActionsOpen) setChatActionsOpen(false);
 }
 
-function setChatActionsOpen(open) {
-  state.chatActionsOpen = Boolean(open);
-  if (chatActionsPopover) chatActionsPopover.hidden = !state.chatActionsOpen;
-  if (chatActionsTrigger) chatActionsTrigger.setAttribute("aria-expanded", String(state.chatActionsOpen));
+function openChatActionsSheet() {
+  if (!chatActionsSheet) return;
+  chatActionsSheet.hidden = false;
+  renderChatSessionActionsState();
+}
+
+function closeChatActionsSheet() {
+  if (chatActionsSheet) chatActionsSheet.hidden = true;
+  if (chatActionsTrigger) chatActionsTrigger.setAttribute("aria-expanded", "false");
 }
 
 function formatSessionUpdated(value) {
@@ -2046,7 +2293,7 @@ function renderSettingsDetails(config) {
     ${backupGrid}
     ${ignoreList}
     <div class="settings-actions">
-      ${config.authRequired ? `
+      ${config.authRequired && !config.githubAvailable ? `
         <button class="secondary-button" type="button" data-auth-open>Set/reset app passcode</button>
         <button class="secondary-button" type="button" data-auth-clear>Clear saved passcode</button>
       ` : ""}
@@ -2362,6 +2609,8 @@ async function saveCurrentChatSessionSummary() {
   const sessionPath = state.chatSession?.path || getActiveChatSessionPath() || "";
   state.chatSummarySaving = true;
   renderChatSessionActionsState();
+  showToast("Saving summary...");
+  flashChatHelper("Saving summary...");
   try {
     const result = await postJson("/api/chat/capture", {
       category: "thought",
@@ -2425,6 +2674,8 @@ async function createCurrentChatStructuredNote() {
   const sessionPath = state.chatSession?.path || getActiveChatSessionPath() || "";
   state.chatNoteCreating = true;
   renderChatSessionActionsState();
+  showToast("Creating note...");
+  flashChatHelper("Creating note...");
   try {
     const result = await postJson("/api/chat/create-note", {
       text: transcript,
@@ -4211,7 +4462,8 @@ function hideToast() {
 }
 
 async function getJson(url) {
-  const response = await fetch(url);
+  const headers = state.authSecret ? { "X-Second-Brain-Secret": state.authSecret } : {};
+  const response = await fetch(url, { headers });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Request failed.");
   return data;
@@ -4219,11 +4471,12 @@ async function getJson(url) {
 
 async function protectedGetJson(url) {
   const response = await fetch(url, {
+    credentials: "same-origin",
     headers: getWriteHeaders()
   });
   const data = await response.json();
   if (!response.ok) {
-    if (response.status === 401) openAuthSheet();
+    handleAuthError(response.status);
     throw new Error(data.error || "Request failed.");
   }
   return data;
@@ -4232,15 +4485,25 @@ async function protectedGetJson(url) {
 async function postJson(url, payload) {
   const response = await fetch(url, {
     method: "POST",
+    credentials: "same-origin",
     headers: getWriteHeaders(),
     body: JSON.stringify(payload)
   });
   const data = await response.json();
   if (!response.ok) {
-    if (response.status === 401) openAuthSheet();
+    handleAuthError(response.status);
     throw new Error(data.error || "Request failed.");
   }
   return data;
+}
+
+function handleAuthError(status) {
+  if (status !== 401) return;
+  if (state.config?.githubAvailable) {
+    window.location.href = "/auth/login";
+  } else if (state.config?.authRequired) {
+    openAuthSheet();
+  }
 }
 
 function getWriteHeaders() {
@@ -4320,8 +4583,14 @@ function formatWatcherStatus(watcher) {
   if (watcher.status === "watching" && watcher.pending) return "watching, indexing soon";
   if (watcher.status === "watching" && watcher.queued) return "watching, queued";
   if (watcher.status === "watching") return "watching";
-  if (watcher.status === "error") return `error: ${watcher.lastError || "unknown"}`;
+  if (watcher.status === "error") return `error: ${compactStatusText(watcher.lastError || "unknown", 120)}`;
   return watcher.status || "unavailable";
+}
+
+function compactStatusText(value, maxLength = 120) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1).trim()}…`;
 }
 
 function cssEscape(value) {

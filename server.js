@@ -20,6 +20,13 @@ const SQLITE_BIN = process.env.SQLITE_BIN || "/usr/bin/sqlite3";
 const WATCH_DEBOUNCE_MS = Number(process.env.WATCH_DEBOUNCE_MS || "1200");
 const AUTO_INDEX_ON_START = process.env.AUTO_INDEX_ON_START !== "false";
 const APP_SECRET = process.env.APP_SECRET || "";
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
+const SESSION_SECRET = process.env.SESSION_SECRET || "";
+const SESSION_MAX_AGE = Math.max(300, Number(process.env.SESSION_MAX_AGE || "86400"));
+const GITHUB_ALLOWED_LOGINS = parseListEnv(process.env.GITHUB_ALLOWED_LOGINS);
+const GITHUB_CONFIG_PRESENT = Boolean(GITHUB_CLIENT_ID || GITHUB_CLIENT_SECRET || SESSION_SECRET || GITHUB_ALLOWED_LOGINS.length);
+const GITHUB_ENABLED = Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET && SESSION_SECRET && GITHUB_ALLOWED_LOGINS.length);
 const CHAT_PROVIDER = (process.env.CHAT_PROVIDER || "deepseek").toLowerCase();
 const OPENCODE_BASE_URL = (process.env.OPENCODE_BASE_URL || "http://127.0.0.1:4096").replace(/\/+$/, "");
 const OPENCODE_SERVER_USERNAME = process.env.OPENCODE_SERVER_USERNAME || "opencode";
@@ -37,6 +44,7 @@ const DEEPSEEK_TRAINING_OPT_OUT = process.env.DEEPSEEK_TRAINING_OPT_OUT !== "fal
 const DEEPSEEK_DEFAULT_THINKING = process.env.DEEPSEEK_THINKING === "enabled" ? "enabled" : "disabled";
 const DEEPSEEK_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT === "max" ? "max" : "high";
 const TEST_AI_JSON = process.env.TEST_AI_JSON || "";
+const TEST_GITHUB_USER_JSON = process.env.TEST_GITHUB_USER_JSON || "";
 const CHAT_CONTEXT_LIMIT = Math.min(Number(process.env.CHAT_CONTEXT_LIMIT || "6"), 12);
 const CHAT_HISTORY_LIMIT = Math.min(Number(process.env.CHAT_HISTORY_LIMIT || "8"), 16);
 const CHAT_SESSIONS_DIR = normalizeVaultRelativeDir(process.env.CHAT_SESSIONS_DIR || "3.Resources/gpt/sessions");
@@ -59,6 +67,11 @@ const SENSITIVE_PATH_PATTERN = /(?:password|passwd|secret|token|credential|api[-
 
 if (!VAULT_PATH) {
   console.error("Missing VAULT_PATH. Create .env from .env.example and set your Obsidian vault path.");
+  process.exit(1);
+}
+
+if (GITHUB_CONFIG_PRESENT && !GITHUB_ENABLED) {
+  console.error("GitHub OAuth requires GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, SESSION_SECRET, and GITHUB_ALLOWED_LOGINS.");
   process.exit(1);
 }
 
@@ -88,6 +101,58 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || `${HOST}:${PORT}`}`);
 
+    if (url.pathname === "/api/auth/me" && req.method === "GET") {
+      return sendJson(res, 200, await getAuthUser(req));
+    }
+
+    if (url.pathname === "/api/auth/check" && req.method === "POST") {
+      requireWriteAuth(req);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (GITHUB_ENABLED && url.pathname === "/auth/login" && req.method === "GET") {
+      const state = generateOAuthState();
+      const params = new URLSearchParams({
+        client_id: GITHUB_CLIENT_ID,
+        redirect_uri: `${getBaseUrl(req)}/auth/callback`,
+        scope: "read:user",
+        state
+      });
+      setOAuthStateCookie(res, state);
+      res.writeHead(302, { Location: `https://github.com/login/oauth/authorize?${params.toString()}` });
+      return res.end();
+    }
+
+    if (GITHUB_ENABLED && url.pathname === "/auth/callback" && req.method === "GET") {
+      const { code, state } = Object.fromEntries(url.searchParams);
+      if (!code || !state) return sendJson(res, 400, { error: "Missing code or state." });
+      if (!consumeOAuthState(state)) {
+        return sendJson(res, 401, { error: "Invalid or expired state parameter." });
+      }
+      clearOAuthStateCookie(res);
+      const accessToken = await exchangeGitHubCode(code, getBaseUrl(req));
+      const user = await fetchGitHubUser(accessToken);
+      if (!isAllowedGitHubLogin(user.login)) {
+        throw httpError(403, "This GitHub account is not allowed to access this vault.");
+      }
+      const sessionId = createSession({
+        userId: String(user.id),
+        userName: user.name || user.login,
+        userAvatar: user.avatar_url,
+        userLogin: user.login
+      });
+      setSessionCookie(res, sessionId);
+      res.writeHead(302, { Location: `${getBaseUrl(req)}/` });
+      return res.end();
+    }
+
+    if (url.pathname === "/auth/logout" && req.method === "POST") {
+      const session = getSession(req);
+      if (session) destroySession(session.id);
+      clearSessionCookie(res);
+      return sendJson(res, 200, { ok: true });
+    }
+
     if (url.pathname === "/api/health" && req.method === "GET") {
       return sendJson(res, 200, await getHealth());
     }
@@ -97,6 +162,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/captures/recent" && req.method === "GET") {
+      requireWriteAuth(req);
       const limit = Math.min(Number(url.searchParams.get("limit") || "12"), 50);
       const captures = await readRecentCaptures(limit);
       return sendJson(res, 200, { captures, monthlyFile: getCurrentMonthlyCaptureFile() });
@@ -116,6 +182,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/index/status" && req.method === "GET") {
+      requireWriteAuth(req);
       return sendJson(res, 200, await getIndexStatus());
     }
 
@@ -125,6 +192,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/settings/ignore-rules" && req.method === "GET") {
+      requireWriteAuth(req);
       return sendJson(res, 200, await getEditableIndexIgnoreRules());
     }
 
@@ -135,10 +203,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/dashboard" && req.method === "GET") {
+      requireWriteAuth(req);
       return sendJson(res, 200, await getDashboard());
     }
 
     if (url.pathname === "/api/personal-sprint" && req.method === "GET") {
+      requireWriteAuth(req);
       return sendJson(res, 200, await getPersonalSprint(url.searchParams.get("view") || ""));
     }
 
@@ -149,6 +219,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/notes/search" && req.method === "GET") {
+      requireWriteAuth(req);
       const query = url.searchParams.get("q") || "";
       const limit = Math.min(Number(url.searchParams.get("limit") || "20"), 50);
       return sendJson(res, 200, await searchNotes(query, limit));
@@ -257,6 +328,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/tasks" && req.method === "GET") {
+      requireWriteAuth(req);
       const status = url.searchParams.get("status") || "open";
       const scope = url.searchParams.get("scope") || "all";
       const source = url.searchParams.get("source") || "all";
@@ -295,7 +367,12 @@ const server = http.createServer(async (req, res) => {
 });
 
 function requireWriteAuth(req) {
-  if (!APP_SECRET) return;
+  const session = getSession(req);
+  if (session) return;
+  if (!APP_SECRET) {
+    if (GITHUB_ENABLED) throw httpError(401, "Not authenticated.");
+    return;
+  }
   const header = req.headers["x-second-brain-secret"] || "";
   const auth = req.headers.authorization || "";
   const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7) : "";
@@ -311,6 +388,161 @@ function timingSafeEqual(a, b) {
   if (left.length !== right.length) return false;
   return crypto.timingSafeEqual(left, right);
 }
+
+function parseListEnv(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isAllowedGitHubLogin(login) {
+  const normalized = String(login || "").trim().toLowerCase();
+  return Boolean(normalized && GITHUB_ALLOWED_LOGINS.includes(normalized));
+}
+
+const sessionStore = new Map();
+const oauthStates = new Map();
+
+function getCookieValue(req, name) {
+  const raw = req.headers.cookie || "";
+  const match = raw.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? match[1] : null;
+}
+
+function getSession(req) {
+  const sessionId = getCookieValue(req, "sb_session");
+  if (!sessionId) return null;
+  const session = sessionStore.get(sessionId);
+  if (!session || session.expiresAt <= Date.now()) {
+    if (session) sessionStore.delete(sessionId);
+    return null;
+  }
+  return { id: sessionId, ...session };
+}
+
+function createSession(user) {
+  const id = crypto.randomUUID();
+  sessionStore.set(id, {
+    ...user,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + SESSION_MAX_AGE * 1000
+  });
+  return id;
+}
+
+function destroySession(sessionId) {
+  sessionStore.delete(sessionId);
+}
+
+function setSessionCookie(res, sessionId, { maxAge = SESSION_MAX_AGE } = {}) {
+  const cookie = `sb_session=${sessionId}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+  appendCookieHeader(res, cookie);
+}
+
+function clearSessionCookie(res) {
+  appendCookieHeader(res, "sb_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+}
+
+function setOAuthStateCookie(res, state) {
+  appendCookieHeader(res, `sb_oauth_state=${state}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300`);
+}
+
+function clearOAuthStateCookie(res) {
+  appendCookieHeader(res, "sb_oauth_state=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
+}
+
+function appendCookieHeader(res, cookie) {
+  const existing = res.getHeader("Set-Cookie") || [];
+  const headers = Array.isArray(existing) ? existing : [existing];
+  headers.push(cookie);
+  res.setHeader("Set-Cookie", headers);
+}
+
+function getBaseUrl(req) {
+  const proto = req.headers["x-forwarded-proto"] || "http";
+  const host = req.headers.host || `${HOST}:${PORT}`;
+  return `${proto}://${host}`;
+}
+
+function generateOAuthState() {
+  const state = crypto.randomUUID();
+  oauthStates.set(state, Date.now());
+  return state;
+}
+
+function consumeOAuthState(state) {
+  const ts = oauthStates.get(state);
+  oauthStates.delete(state);
+  return Boolean(ts && Date.now() - ts < 300000);
+}
+
+async function exchangeGitHubCode(code, baseUrl) {
+  if (TEST_GITHUB_USER_JSON) return "test-github-access-token";
+  const response = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      client_id: GITHUB_CLIENT_ID,
+      client_secret: GITHUB_CLIENT_SECRET,
+      code,
+      redirect_uri: `${baseUrl}/auth/callback`
+    })
+  });
+  const data = await response.json();
+  if (!response.ok || data.error) {
+    throw httpError(502, data.error_description || data.error || "GitHub OAuth token exchange failed.");
+  }
+  return data.access_token;
+}
+
+async function fetchGitHubUser(accessToken) {
+  if (TEST_GITHUB_USER_JSON) {
+    try {
+      return JSON.parse(TEST_GITHUB_USER_JSON);
+    } catch {
+      throw httpError(500, "TEST_GITHUB_USER_JSON is not valid JSON.");
+    }
+  }
+  const response = await fetch("https://api.github.com/user", {
+    headers: {
+      "Accept": "application/vnd.github.v3+json",
+      "Authorization": `Bearer ${accessToken}`
+    }
+  });
+  if (!response.ok) throw httpError(502, "Failed to fetch GitHub user info.");
+  return response.json();
+}
+
+async function getAuthUser(req) {
+  const session = getSession(req);
+  if (!session) {
+    if (GITHUB_ENABLED) throw httpError(401, "Not authenticated.");
+    if (APP_SECRET) throw httpError(401, "Passcode required.");
+    return { authenticated: false, method: "none" };
+  }
+  return {
+    authenticated: true,
+    method: "github",
+    id: session.userId,
+    name: session.userName,
+    login: session.userLogin,
+    avatar: session.userAvatar
+  };
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessionStore) {
+    if (session.expiresAt <= now) sessionStore.delete(id);
+  }
+  for (const [state, ts] of oauthStates) {
+    if (now - ts > 300000) oauthStates.delete(state);
+  }
+}, 60000);
 
 server.listen(PORT, HOST, () => {
   console.log(`Second Brain App running at http://${HOST}:${PORT}`);
@@ -363,7 +595,8 @@ async function getHealth() {
       watcher: index.watcher
     },
     security: {
-      authRequired: Boolean(APP_SECRET),
+      authRequired: Boolean(APP_SECRET) || GITHUB_ENABLED,
+      githubAvailable: GITHUB_ENABLED,
       lanAccess: isLanBound(),
       warning: getLanWarning()
     }
@@ -383,7 +616,8 @@ async function getPublicConfig() {
     localUrl: `http://127.0.0.1:${PORT}`,
     lanUrl: isLanBound() ? `http://<your-mac-ip>:${PORT}` : "",
     lanAccess: isLanBound(),
-    authRequired: Boolean(APP_SECRET),
+    authRequired: Boolean(APP_SECRET) || GITHUB_ENABLED,
+    githubAvailable: GITHUB_ENABLED,
     securityWarning: getLanWarning(),
     currentMonth: getCurrentMonthSlug(),
     monthlyFile: getCurrentMonthlyCaptureFile(),
@@ -443,6 +677,7 @@ function isLanBound() {
 
 function getLanWarning() {
   if (!isLanBound()) return "";
+  if (GITHUB_ENABLED) return "LAN access is enabled and write actions require GitHub login.";
   if (APP_SECRET) return "LAN access is enabled and write actions require the app passcode.";
   return "LAN access is enabled without a passcode. Devices on your network can write to this vault.";
 }
@@ -1361,6 +1596,15 @@ async function deleteOpenCodeSession(sessionPath) {
   return { deleted: true, path: `opencode:${id}` };
 }
 
+async function deleteOpenCodeHelperSession(session) {
+  if (!session?.id) return;
+  try {
+    await deleteOpenCodeSession(`opencode:${session.id}`);
+  } catch {
+    // Helper sessions are disposable; a cleanup failure should not block the user-facing workflow.
+  }
+}
+
 async function updateMarkdownChatSession(sessionPath, title) {
   const session = await readChatSessionMetadata(sessionPath);
   const filePath = resolveChatSessionPath(session.path);
@@ -1675,79 +1919,112 @@ async function callOpenCodeChatCompletion({ sessionId, message, thinkingMode, sk
 }
 
 async function callOpenCodeCaptureSummary({ category, text }) {
-  const session = await createOpenCodeSession({ title: "Capture summary" });
-  const modelRef = getOpenCodeModelRef("disabled");
-  const result = await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
-    method: "POST",
-    body: {
+  let session = null;
+  try {
+    session = await createOpenCodeSession({ title: "Capture summary" });
+    const modelRef = getOpenCodeModelRef("disabled");
+    const body = {
       model: modelRef,
-      parts: [{
-        type: "text",
-        text: [
-          "Convert this assistant response into one or two plain sentences for an Obsidian fleeting note.",
-          "Capture the key concept, decision, or reusable insight. Do not include bullets, labels, source links, or commentary.",
-          `Capture category: ${category}`,
-          "",
-          clipText(text, 6000)
-        ].join("\n")
-      }]
-    }
-  });
-  const summary = normalizeAiCaptureSummary(extractOpenCodeText(result));
-  if (!summary) throw httpError(502, "OpenCode did not return a capture summary.");
-  return summary;
+        parts: [{
+          type: "text",
+          text: [
+            "You are summarizing provided chat text into an Obsidian fleeting-note capture.",
+            "Use only the text between <chat_text> tags below. Do not ask for more input.",
+            "Return one or two plain sentences that capture the key concept, decision, or reusable insight.",
+            "Do not include bullets, labels, source links, markdown headings, or commentary.",
+            `Capture category: ${category}`,
+            "",
+            "<chat_text>",
+            clipText(text, 6000),
+            "</chat_text>"
+          ].join("\n")
+        }]
+      };
+    if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
+    await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
+      method: "POST",
+      body
+    });
+    const answer = await waitForOpenCodeFinalAnswer(session.id);
+    const summary = normalizeAiCaptureSummary(answer);
+    if (!summary) throw httpError(502, "OpenCode did not return a capture summary.");
+    return summary;
+  } finally {
+    await deleteOpenCodeHelperSession(session);
+  }
 }
 
 async function callOpenCodeTodoExtraction({ text }) {
-  const session = await createOpenCodeSession({ title: "Todo extraction" });
-  const modelRef = getOpenCodeModelRef("disabled");
-  await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
-    method: "POST",
-    body: {
+  let session = null;
+  try {
+    session = await createOpenCodeSession({ title: "Todo extraction" });
+    const modelRef = getOpenCodeModelRef("disabled");
+    const body = {
       model: modelRef,
       parts: [{
         type: "text",
         text: buildTodoExtractionPrompt(text)
       }]
-    }
-  });
-  const answer = await waitForOpenCodeFinalAnswer(session.id);
-  return parseTodoExtractionResponse(answer);
+    };
+    if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
+    await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
+      method: "POST",
+      body
+    });
+    const answer = await waitForOpenCodeFinalAnswer(session.id);
+    return parseTodoExtractionResponse(answer);
+  } finally {
+    await deleteOpenCodeHelperSession(session);
+  }
 }
 
 async function callOpenCodeStructuredNote({ text }) {
-  const session = await createOpenCodeSession({ title: "Structured note" });
-  const modelRef = getOpenCodeModelRef("disabled");
-  await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
-    method: "POST",
-    body: {
+  let session = null;
+  try {
+    session = await createOpenCodeSession({ title: "Structured note" });
+    const modelRef = getOpenCodeModelRef("disabled");
+    const body = {
       model: modelRef,
       parts: [{
         type: "text",
         text: buildStructuredNotePrompt(text)
       }]
-    }
-  });
-  const answer = await waitForOpenCodeFinalAnswer(session.id);
-  return parseStructuredNoteResponse(answer);
+    };
+    if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
+    await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
+      method: "POST",
+      body
+    });
+    const answer = await waitForOpenCodeFinalAnswer(session.id);
+    return parseStructuredNoteResponse(answer);
+  } finally {
+    await deleteOpenCodeHelperSession(session);
+  }
 }
 
 async function callOpenCodeMonthlyFleetingReview({ month, markdown }) {
   if (TEST_AI_JSON) return parseStructuredNoteResponse(TEST_AI_JSON);
-  const session = await createOpenCodeSession({ title: `Fleeting review ${month}` });
-  const modelRef = getOpenCodeModelRef("disabled");
-  await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
-    method: "POST",
-    body: {
+  let session = null;
+  try {
+    session = await createOpenCodeSession({ title: `Fleeting review ${month}` });
+    const modelRef = getOpenCodeModelRef("disabled");
+    const body = {
       model: modelRef,
       parts: [{
         type: "text",
         text: buildMonthlyFleetingReviewPrompt({ month, markdown })
       }]
-    }
-  });
-  const answer = await waitForOpenCodeFinalAnswer(session.id);
-  return parseStructuredNoteResponse(answer);
+    };
+    if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
+    await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
+      method: "POST",
+      body
+    });
+    const answer = await waitForOpenCodeFinalAnswer(session.id);
+    return parseStructuredNoteResponse(answer);
+  } finally {
+    await deleteOpenCodeHelperSession(session);
+  }
 }
 
 async function callDeepSeekTodoExtraction({ text }) {

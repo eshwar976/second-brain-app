@@ -24,6 +24,10 @@ test("todo capture, edit, and triage preserve Obsidian-friendly Markdown", async
         HOST: "127.0.0.1",
         PORT: port,
         APP_SECRET: secret,
+        GITHUB_CLIENT_ID: "",
+        GITHUB_CLIENT_SECRET: "",
+        SESSION_SECRET: "",
+        GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
@@ -55,7 +59,7 @@ test("todo capture, edit, and triage preserve Obsidian-friendly Markdown", async
     assert.doesNotMatch(markdown, /\[created::/);
 
     await postJson(`http://127.0.0.1:${port}/api/index/run`, secret, {});
-    const tasks = await getJson(`http://127.0.0.1:${port}/api/tasks`);
+    const tasks = await getJson(`http://127.0.0.1:${port}/api/tasks`, secret);
     assert.equal(tasks.tasks.length, 1);
     assert.equal(tasks.tasks[0].text, "write test task");
     assert.equal(tasks.tasks[0].due, "2026-05-12");
@@ -68,7 +72,7 @@ test("todo capture, edit, and triage preserve Obsidian-friendly Markdown", async
     markdown = await readFile(monthlyFile, "utf8");
     assert.match(markdown, /^- \[ \] \d{1,2}:\d{2} (?:AM|PM) updated test task \[type:: todo] \[important:: true] \[urgent:: false] \[priority:: medium] \[due:: 2026-05-12]$/m);
 
-    const updatedTasks = await getJson(`http://127.0.0.1:${port}/api/tasks`);
+    const updatedTasks = await getJson(`http://127.0.0.1:${port}/api/tasks`, secret);
     await postJson(`http://127.0.0.1:${port}/api/tasks/triage`, secret, {
       taskId: updatedTasks.tasks[0].id,
       important: false,
@@ -214,6 +218,10 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
         HOST: "127.0.0.1",
         PORT: port,
         APP_SECRET: secret,
+        GITHUB_CLIENT_ID: "",
+        GITHUB_CLIENT_SECRET: "",
+        SESSION_SECRET: "",
+        GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore"),
@@ -225,7 +233,7 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
 
     await waitForServer(`http://127.0.0.1:${port}/api/health`);
 
-    const sprint = await getJson(`http://127.0.0.1:${port}/api/personal-sprint`);
+    const sprint = await getJson(`http://127.0.0.1:${port}/api/personal-sprint`, secret);
     assert.equal(sprint.sprint.path, "2.Areas/Personal/OKRs/FY2027/Q1/sprints/sprint-2026-05-11.md");
     assert.equal(sprint.sprint.selection, "active-by-date");
     assert.equal(sprint.sprint.candidateCount, 3);
@@ -240,13 +248,13 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
     assert.equal(sprint.okr.objectives.length, 1);
     assert.equal(sprint.okr.objectives[0].keyResults[1].progress.count, 2);
 
-    const lastSprint = await getJson(`http://127.0.0.1:${port}/api/personal-sprint?view=last`);
+    const lastSprint = await getJson(`http://127.0.0.1:${port}/api/personal-sprint?view=last`, secret);
     assert.equal(lastSprint.sprint.path, "2.Areas/Personal/OKRs/FY2027/Q0/sprints/sprint-2026-04-01.md");
     assert.equal(lastSprint.sprint.view, "last");
     assert.equal(lastSprint.sprint.review.incompleteActiveKr, false);
     assert.equal(lastSprint.sprint.review.uncheckedWeekCount, 0);
 
-    const nextSprint = await getJson(`http://127.0.0.1:${port}/api/personal-sprint?view=next`);
+    const nextSprint = await getJson(`http://127.0.0.1:${port}/api/personal-sprint?view=next`, secret);
     assert.equal(nextSprint.sprint.path, "2.Areas/Personal/OKRs/FY2027/Q2/sprints/sprint-2026-08-03.md");
     assert.equal(nextSprint.sprint.view, "next");
     assert.equal(nextSprint.sprint.preview.plannedWeekCount, 0);
@@ -284,6 +292,10 @@ test("deep work creates separate session files and captures ending recap", async
         HOST: "127.0.0.1",
         PORT: port,
         APP_SECRET: secret,
+        GITHUB_CLIENT_ID: "",
+        GITHUB_CLIENT_SECRET: "",
+        SESSION_SECRET: "",
+        GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore"),
@@ -355,6 +367,10 @@ test("monthly fleeting review creates a separate draft without changing the raw 
         HOST: "127.0.0.1",
         PORT: port,
         APP_SECRET: secret,
+        GITHUB_CLIENT_ID: "",
+        GITHUB_CLIENT_SECRET: "",
+        SESSION_SECRET: "",
+        GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore"),
@@ -392,6 +408,136 @@ test("monthly fleeting review creates a separate draft without changing the raw 
   }
 });
 
+test("protected endpoints reject unauthenticated requests", async () => {
+  const vaultPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-vault-"));
+  const appDataPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-data-"));
+  const port = String(50000 + Math.floor(Math.random() * 1000));
+  const secret = "test-passcode";
+  let server;
+
+  try {
+    await mkdir(path.join(vaultPath, "2.Areas", "Personal", "fleeting"), { recursive: true });
+    server = spawn(process.execPath, [serverPath.pathname], {
+      cwd: path.dirname(serverPath.pathname),
+      env: {
+        ...process.env,
+        VAULT_PATH: vaultPath,
+        HOST: "127.0.0.1",
+        PORT: port,
+        APP_SECRET: secret,
+        GITHUB_CLIENT_ID: "",
+        GITHUB_CLIENT_SECRET: "",
+        SESSION_SECRET: "",
+        GITHUB_ALLOWED_LOGINS: "",
+        AUTO_INDEX_ON_START: "false",
+        DATA_DIR: appDataPath,
+        INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    await waitForServer(`http://127.0.0.1:${port}/api/health`);
+    const response = await fetch(`http://127.0.0.1:${port}/api/tasks`);
+    const data = await response.json();
+    assert.equal(response.status, 401);
+    assert.equal(data.error, "App passcode required.");
+  } finally {
+    if (server) server.kill("SIGTERM");
+    await rm(vaultPath, { recursive: true, force: true });
+    await rm(appDataPath, { recursive: true, force: true });
+  }
+});
+
+test("github oauth rejects non-allowlisted accounts without network calls", async () => {
+  const vaultPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-vault-"));
+  const appDataPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-data-"));
+  const port = String(51000 + Math.floor(Math.random() * 1000));
+  let server;
+
+  try {
+    await mkdir(path.join(vaultPath, "2.Areas", "Personal", "fleeting"), { recursive: true });
+    server = spawn(process.execPath, [serverPath.pathname], {
+      cwd: path.dirname(serverPath.pathname),
+      env: {
+        ...process.env,
+        VAULT_PATH: vaultPath,
+        HOST: "127.0.0.1",
+        PORT: port,
+        APP_SECRET: "",
+        GITHUB_CLIENT_ID: "test-client",
+        GITHUB_CLIENT_SECRET: "test-secret",
+        SESSION_SECRET: "test-session-secret",
+        GITHUB_ALLOWED_LOGINS: "allowed-user",
+        TEST_GITHUB_USER_JSON: JSON.stringify({
+          id: 123,
+          login: "intruder",
+          name: "Intruder",
+          avatar_url: "https://example.invalid/avatar.png"
+        }),
+        AUTO_INDEX_ON_START: "false",
+        DATA_DIR: appDataPath,
+        INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    await waitForServer(`http://127.0.0.1:${port}/api/health`);
+    const loginResponse = await fetch(`http://127.0.0.1:${port}/auth/login`, { redirect: "manual" });
+    assert.equal(loginResponse.status, 302);
+    const location = loginResponse.headers.get("location") || "";
+    const state = new URL(location).searchParams.get("state");
+    assert.ok(state);
+
+    const callback = await fetch(`http://127.0.0.1:${port}/auth/callback?code=test-code&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    const data = await callback.json();
+    assert.equal(callback.status, 403);
+    assert.equal(data.error, "This GitHub account is not allowed to access this vault.");
+    assert.doesNotMatch(callback.headers.get("set-cookie") || "", /sb_session=/);
+  } finally {
+    if (server) server.kill("SIGTERM");
+    await rm(vaultPath, { recursive: true, force: true });
+    await rm(appDataPath, { recursive: true, force: true });
+  }
+});
+
+test("github oauth config fails startup without an allowlist", async () => {
+  const vaultPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-vault-"));
+  const appDataPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-data-"));
+  const port = String(52000 + Math.floor(Math.random() * 1000));
+  let server;
+
+  try {
+    await mkdir(path.join(vaultPath, "2.Areas", "Personal", "fleeting"), { recursive: true });
+    server = spawn(process.execPath, [serverPath.pathname], {
+      cwd: path.dirname(serverPath.pathname),
+      env: {
+        ...process.env,
+        VAULT_PATH: vaultPath,
+        HOST: "127.0.0.1",
+        PORT: port,
+        APP_SECRET: "",
+        GITHUB_CLIENT_ID: "test-client",
+        GITHUB_CLIENT_SECRET: "test-secret",
+        SESSION_SECRET: "test-session-secret",
+        GITHUB_ALLOWED_LOGINS: "",
+        AUTO_INDEX_ON_START: "false",
+        DATA_DIR: appDataPath,
+        INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const { code, stderr } = await waitForExit(server);
+    server = null;
+    assert.equal(code, 1);
+    assert.match(stderr, /GITHUB_ALLOWED_LOGINS/);
+  } finally {
+    if (server) server.kill("SIGTERM");
+    await rm(vaultPath, { recursive: true, force: true });
+    await rm(appDataPath, { recursive: true, force: true });
+  }
+});
+
 async function waitForServer(url) {
   const started = Date.now();
   while (Date.now() - started < 5000) {
@@ -405,8 +551,20 @@ async function waitForServer(url) {
   throw new Error("Server did not become ready.");
 }
 
-async function getJson(url) {
-  const response = await fetch(url);
+function waitForExit(child) {
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  return new Promise((resolve) => {
+    child.on("exit", (code) => resolve({ code, stderr }));
+  });
+}
+
+async function getJson(url, secret = "") {
+  const response = await fetch(url, {
+    headers: secret ? { "X-Second-Brain-Secret": secret } : {}
+  });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Request failed.");
   return data;
