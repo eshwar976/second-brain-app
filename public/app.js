@@ -17,6 +17,7 @@ const CATEGORY_ICONS = {
 const CAPTURE_TYPE_OPTIONS = ["log", "thought", "idea", "reflection"];
 const TASK_COMPLETE_EXIT_MS = 500;
 const TASK_UNDO_TOAST_MS = 5200;
+const TASK_VIEW_STORAGE_KEY = "secondBrain.taskView";
 const THEME_STORAGE_KEY = "secondBrain.theme";
 const APP_SECRET_STORAGE_KEY = "secondBrain.appSecret";
 const CHAT_THINKING_STORAGE_KEY = "secondBrain.chatThinkingMode";
@@ -45,6 +46,7 @@ const state = {
   taskScope: "all",
   taskSource: "all",
   taskFocus: "all",
+  taskView: "matrix",
   captureView: "today",
   chatMessages: [],
   chatSending: false,
@@ -83,8 +85,7 @@ const state = {
     dismissedKeys: new Set()
   },
   dashboard: null,
-  monthlyReviewGenerating: false,
-  monthlyReviewPath: "",
+  dashboardShowAllCadence: false,
   personalSprint: null,
   personalSprintView: "",
   sprintOpenObjectives: new Set(),
@@ -101,6 +102,7 @@ const state = {
   todoSheetMode: "capture",
   todoImportant: true,
   todoUrgent: false,
+  todoEffort: "",
   captureSaving: false,
   captureInFlightKey: "",
   lastCaptureKey: "",
@@ -108,7 +110,14 @@ const state = {
   authSecret: "",
   authUser: null,
   themePreference: "system",
-  toastTimer: null
+  toastTimer: null,
+  speech: {
+    supported: false,
+    activeTarget: "",
+    recognition: null,
+    baseText: "",
+    finalText: ""
+  }
 };
 
 const timeline = document.querySelector("#timeline");
@@ -116,6 +125,7 @@ const captureScreen = document.querySelector(".capture-screen");
 const form = document.querySelector("#capture-form");
 const textarea = document.querySelector("#capture-text");
 const helperLine = document.querySelector("#helper-line");
+const captureSpeechButton = document.querySelector("#capture-speech-button");
 const vaultName = document.querySelector("#vault-name");
 const currentMonth = document.querySelector("#current-month");
 const sendButton = document.querySelector(".send-button");
@@ -132,6 +142,7 @@ const chatForm = document.querySelector("#chat-form");
 const chatText = document.querySelector("#chat-text");
 const chatSendButton = document.querySelector("#chat-send-button");
 const chatHelperLine = document.querySelector("#chat-helper-line");
+const chatSpeechButton = document.querySelector("#chat-speech-button");
 const chatStatus = document.querySelector("#chat-status");
 const chatThinkingButtons = Array.from(document.querySelectorAll("[data-chat-thinking]"));
 const chatActionsTrigger = document.querySelector("#chat-actions-trigger");
@@ -163,27 +174,27 @@ const tasksList = document.querySelector("#tasks-list");
 const tasksCount = document.querySelector("#tasks-count");
 const tasksNavBadge = document.querySelector("#tasks-nav-badge");
 const tasksRefreshButton = document.querySelector("#tasks-refresh-button");
-const taskStatusFilter = document.querySelector("#task-status-filter");
+const taskFilterPanel = document.querySelector("#task-filter-panel");
+const taskFilterToggle = document.querySelector("#task-filter-toggle");
+const taskFilterCount = document.querySelector("#task-filter-count");
 const taskFocusFilter = document.querySelector("#task-focus-filter");
 const taskScopeFilter = document.querySelector("#task-scope-filter");
 const taskSourceFilter = document.querySelector("#task-source-filter");
 const taskFilterClearButton = document.querySelector("#task-filter-clear");
+const taskViewButtons = Array.from(document.querySelectorAll("[data-task-view]"));
 const captureViewButtons = Array.from(document.querySelectorAll("[data-capture-view]"));
 const dashboardOverview = document.querySelector("#dashboard-overview");
-const dashboardCaptures = document.querySelector("#dashboard-captures");
-const monthlyReviewButton = document.querySelector("#monthly-review-button");
-const monthlyReviewStatus = document.querySelector("#monthly-review-status");
-const dashboardFocusTasks = document.querySelector("#dashboard-focus-tasks");
-const dashboardDueSoon = document.querySelector("#dashboard-due-soon");
-const dashboardTriage = document.querySelector("#dashboard-triage");
-const dashboardRecentNotes = document.querySelector("#dashboard-recent-notes");
+const dashboardCadenceToggle = document.querySelector("#dashboard-cadence-toggle");
 const sprintContent = document.querySelector("#sprint-content");
+const sprintViewToggle = document.querySelector("#sprint-view-toggle");
+const sprintCategorizeButton = document.querySelector("#sprint-categorize-button");
 const sprintRefreshButton = document.querySelector("#sprint-refresh-button");
 const todoSheet = document.querySelector("#todo-sheet");
 const todoSheetKicker = todoSheet?.querySelector(".sheet-header .eyebrow");
 const todoSheetTitle = document.querySelector("#todo-sheet-title");
 const todoImportantButtons = Array.from(document.querySelectorAll("[data-todo-important]"));
 const todoUrgentButtons = Array.from(document.querySelectorAll("[data-todo-urgent]"));
+const todoEffortButtons = Array.from(document.querySelectorAll("[data-todo-effort]"));
 const duePresetButtons = Array.from(document.querySelectorAll("[data-due-preset]"));
 const todoDueInput = document.querySelector("#todo-due");
 const todoConfirmButton = document.querySelector("#todo-confirm");
@@ -209,9 +220,11 @@ init();
 async function init() {
   initTheme();
   initAuth();
+  initTaskView();
   initDeepWork();
   initChatContextMemory();
   wireInteractions();
+  initSpeechRecognition();
   registerServiceWorker();
   await loadConfig();
   await checkAuth();
@@ -224,6 +237,11 @@ async function init() {
     loadChatSessionsCache().catch(() => {})
   ]);
   textarea.focus();
+}
+
+function initTaskView() {
+  const storedTaskView = window.localStorage.getItem(TASK_VIEW_STORAGE_KEY);
+  state.taskView = storedTaskView === "list" || storedTaskView === "matrix" ? storedTaskView : "matrix";
 }
 
 function showApp() {
@@ -367,6 +385,9 @@ function wireInteractions() {
     window.setTimeout(closeChatSuggestions, 120);
   });
 
+  captureSpeechButton?.addEventListener("click", () => toggleSpeechInput("capture"));
+  chatSpeechButton?.addEventListener("click", () => toggleSpeechInput("chat"));
+
   chatThinkingButtons.forEach((button) => {
     button.addEventListener("click", () => {
       const requestedMode = button.dataset.chatThinking === "enabled" ? "enabled" : "disabled";
@@ -478,6 +499,14 @@ function wireInteractions() {
     });
   });
 
+  todoEffortButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const effort = button.dataset.todoEffort || "";
+      state.todoEffort = state.todoEffort === effort ? "" : effort;
+      renderTodoSheetState();
+    });
+  });
+
   duePresetButtons.forEach((button) => {
     button.addEventListener("click", () => {
       setDuePreset(button.dataset.duePreset || "none");
@@ -508,7 +537,8 @@ function wireInteractions() {
     const metadata = {
       important: state.todoImportant,
       urgent: state.todoUrgent,
-      due: todoDueInput?.value || ""
+      due: todoDueInput?.value || "",
+      effort: state.todoEffort
     };
 
     if (state.todoSheetMode === "triage") {
@@ -583,15 +613,8 @@ function wireInteractions() {
     await loadPersonalSprint();
   });
 
-  monthlyReviewButton?.addEventListener("click", async () => {
-    await createMonthlyFleetingReview();
-  });
-
-  monthlyReviewStatus?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-open-note]");
-    if (!button) return;
-    event.preventDefault();
-    openObsidianNote(button.dataset.openNote || "");
+  sprintCategorizeButton?.addEventListener("click", async () => {
+    await openSprintCategorizeSession();
   });
 
   actionToast?.addEventListener("click", async (event) => {
@@ -605,6 +628,7 @@ function wireInteractions() {
   tasksList?.addEventListener("click", handleTaskActionClick);
   sprintContent?.addEventListener("click", handleSprintClick);
   sprintContent?.addEventListener("change", handleSprintChange);
+  sprintViewToggle?.addEventListener("click", handleSprintClick);
   chatTimeline?.addEventListener("click", handleChatTimelineClick);
   chatSuggestions?.addEventListener("mousedown", handleChatSuggestionPointer);
   chatContextPanel?.addEventListener("click", handleChatContextPanelClick);
@@ -616,14 +640,20 @@ function wireInteractions() {
   timeline?.addEventListener("pointerup", handleCapturePointerUp);
   timeline?.addEventListener("pointercancel", resetCaptureSwipe);
   timeline?.addEventListener("dblclick", handleCaptureEditDoubleClick);
-  [dashboardFocusTasks, dashboardDueSoon, dashboardTriage].forEach((target) => {
-    target?.addEventListener("click", handleTaskActionClick);
-    target?.addEventListener("dblclick", handleTaskEditDoubleClick);
-  });
-
-  [taskStatusFilter, taskFocusFilter, taskScopeFilter, taskSourceFilter].forEach((select) => {
+  [taskFocusFilter, taskScopeFilter, taskSourceFilter].forEach((select) => {
     select?.addEventListener("change", async () => {
       readTaskFiltersFromControls();
+      renderTaskFilterState();
+      await loadTasks();
+    });
+  });
+
+  taskViewButtons.forEach((button) => {
+    button.addEventListener("click", async () => {
+      const nextView = button.dataset.taskView || "matrix";
+      if (nextView === state.taskView) return;
+      state.taskView = nextView === "list" ? "list" : "matrix";
+      window.localStorage.setItem(TASK_VIEW_STORAGE_KEY, state.taskView);
       renderTaskFilterState();
       await loadTasks();
     });
@@ -635,6 +665,10 @@ function wireInteractions() {
     await loadTasks();
   });
 
+  taskFilterToggle?.addEventListener("click", () => {
+    setTaskFiltersOpen(taskFilterPanel?.hidden ?? true);
+  });
+
   captureViewButtons.forEach((button) => {
     button.addEventListener("click", () => {
       state.captureView = button.dataset.captureView || "today";
@@ -644,12 +678,23 @@ function wireInteractions() {
   });
 
   dashboardOverview?.addEventListener("click", (event) => {
-    const tile = event.target.closest("[data-dashboard-task-focus]");
-    if (!tile) return;
-    openTaskView({
-      scope: tile.dataset.dashboardTaskScope || "all",
-      focus: tile.dataset.dashboardTaskFocus || "all"
-    });
+    const actionButton = event.target.closest("[data-cadence-prompt]");
+    if (actionButton) {
+      event.preventDefault();
+      startChatWithPrompt(actionButton.dataset.cadencePrompt || "");
+      return;
+    }
+
+    const noteButton = event.target.closest("[data-open-note]");
+    if (noteButton) {
+      event.preventDefault();
+      openObsidianNote(noteButton.dataset.openNote || "");
+    }
+  });
+
+  dashboardCadenceToggle?.addEventListener("click", () => {
+    state.dashboardShowAllCadence = !state.dashboardShowAllCadence;
+    renderDashboard();
   });
 
   searchForm?.addEventListener("submit", async (event) => {
@@ -706,6 +751,142 @@ function initChatContextMemory() {
     state.pinnedChatContext = Array.isArray(items) ? items.slice(0, PINNED_CONTEXT_LIMIT) : [];
   } catch {
     state.pinnedChatContext = [];
+  }
+}
+
+function initSpeechRecognition() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  state.speech.supported = Boolean(SpeechRecognition);
+  [captureSpeechButton, chatSpeechButton].forEach((button) => {
+    if (button) button.hidden = !state.speech.supported;
+    button?.closest(".input-row")?.classList.toggle("has-speech", state.speech.supported);
+  });
+}
+
+function toggleSpeechInput(target) {
+  if (!state.speech.supported) {
+    flashSpeechStatus(target, "Voice input is not supported in this browser.");
+    return;
+  }
+  if (state.speech.activeTarget === target) {
+    stopSpeechInput();
+    return;
+  }
+  startSpeechInput(target);
+}
+
+function startSpeechInput(target) {
+  stopSpeechInput({ silent: true });
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const input = getSpeechInput(target);
+  if (!SpeechRecognition || !input) return;
+
+  const recognition = new SpeechRecognition();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = navigator.language || "en-US";
+
+  state.speech.activeTarget = target;
+  state.speech.recognition = recognition;
+  state.speech.baseText = input.value || "";
+  state.speech.finalText = "";
+  renderSpeechState();
+  flashSpeechStatus(target, "Listening...");
+
+  recognition.onresult = (event) => {
+    let interimText = "";
+    let finalText = "";
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const result = event.results[index];
+      const transcript = result[0]?.transcript || "";
+      if (result.isFinal) {
+        finalText += transcript;
+      } else {
+        interimText += transcript;
+      }
+    }
+    if (finalText) {
+      state.speech.finalText = mergeSpeechText(state.speech.finalText, finalText);
+    }
+    applySpeechText(target, mergeSpeechText(state.speech.finalText, interimText));
+  };
+
+  recognition.onerror = (event) => {
+    const message = event.error === "not-allowed"
+      ? "Microphone permission was blocked."
+      : "Voice input stopped.";
+    flashSpeechStatus(target, message);
+  };
+
+  recognition.onend = () => {
+    const endedTarget = state.speech.activeTarget;
+    state.speech.recognition = null;
+    state.speech.activeTarget = "";
+    state.speech.baseText = "";
+    state.speech.finalText = "";
+    renderSpeechState();
+    if (endedTarget) flashSpeechStatus(endedTarget, "Voice input ended.");
+  };
+
+  try {
+    recognition.start();
+  } catch {
+    stopSpeechInput();
+  }
+}
+
+function stopSpeechInput({ silent = false } = {}) {
+  const recognition = state.speech.recognition;
+  const target = state.speech.activeTarget;
+  state.speech.recognition = null;
+  state.speech.activeTarget = "";
+  state.speech.baseText = "";
+  state.speech.finalText = "";
+  renderSpeechState();
+  if (recognition) {
+    recognition.onend = null;
+    recognition.stop();
+  }
+  if (!silent && target) flashSpeechStatus(target, "Voice input stopped.");
+}
+
+function getSpeechInput(target) {
+  return target === "chat" ? chatText : textarea;
+}
+
+function applySpeechText(target, speechText) {
+  const input = getSpeechInput(target);
+  if (!input) return;
+  input.value = mergeSpeechText(state.speech.baseText, speechText);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.focus();
+}
+
+function mergeSpeechText(left, right) {
+  return [String(left || "").trimEnd(), String(right || "").trim()].filter(Boolean).join(" ");
+}
+
+function renderSpeechState() {
+  const active = state.speech.activeTarget;
+  [
+    [captureSpeechButton, "capture"],
+    [chatSpeechButton, "chat"]
+  ].forEach(([button, target]) => {
+    if (!button) return;
+    const isActive = active === target;
+    button.classList.toggle("is-listening", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+    button.setAttribute("aria-label", isActive
+      ? `Stop ${target === "chat" ? "chat" : "capture"} dictation`
+      : `Dictate ${target === "chat" ? "chat message" : "capture"}`);
+  });
+}
+
+function flashSpeechStatus(target, message) {
+  if (target === "chat") {
+    flashChatHelper(message);
+  } else {
+    flashHelper(message);
   }
 }
 
@@ -939,7 +1120,6 @@ function setActiveTab(tab) {
 
   if (tab === "dashboard") {
     loadDashboard();
-    if (!state.searchResults.length) runSearch();
   }
 
   if (tab === "tasks") {
@@ -1205,6 +1385,11 @@ async function startChatWithDraft(message, contextItems = []) {
   scheduleSuggestedChatContext();
   setActiveTab("chat");
   chatText?.focus();
+}
+
+async function startChatWithPrompt(message, contextItems = []) {
+  await startChatWithDraft(message, contextItems);
+  await submitChat();
 }
 
 async function toggleChatSessionPicker() {
@@ -2363,7 +2548,7 @@ async function loadTasks() {
       status: state.taskStatus,
       scope: state.taskScope,
       source: state.taskSource,
-      focus: state.taskFocus
+      focus: state.taskView === "matrix" ? "all" : state.taskFocus
     });
     const data = await getJson(`/api/tasks?${params.toString()}`);
     state.tasks = data.tasks || [];
@@ -2405,31 +2590,12 @@ async function rebuildIndex() {
       dbPath: result.dbPath
     };
     renderIndexStatus();
-    await Promise.all([loadTasks(), runSearch(), loadDashboard()]);
+    await Promise.all([loadTasks(), loadDashboard()]);
   } catch (error) {
     renderIndexError(error.message);
   } finally {
     indexRunButton.disabled = false;
     indexRunButton.textContent = "Rebuild index";
-  }
-}
-
-async function createMonthlyFleetingReview() {
-  state.monthlyReviewGenerating = true;
-  renderMonthlyReviewState();
-  try {
-    const result = await postJson("/api/reviews/monthly-fleeting", {});
-    state.monthlyReviewPath = result.review?.path || "";
-    await loadIndexStatus();
-    if (state.dashboard) await loadDashboard();
-    showToast("Monthly review created.");
-    renderMonthlyReviewState();
-  } catch (error) {
-    showToast(error.message, { duration: 3400 });
-    if (monthlyReviewStatus) monthlyReviewStatus.textContent = error.message;
-  } finally {
-    state.monthlyReviewGenerating = false;
-    renderMonthlyReviewState();
   }
 }
 
@@ -2726,6 +2892,7 @@ function openTodoSheet({ mode = "capture", text = "", task = null } = {}) {
   state.pendingTriageTask = task;
   state.todoImportant = task?.important ?? true;
   state.todoUrgent = task?.urgent ?? false;
+  state.todoEffort = task?.effort || "";
   if (todoDueInput) todoDueInput.value = task?.due || "";
   if (todoSheetKicker) todoSheetKicker.textContent = mode === "triage" ? "task triage" : "todo capture";
   if (todoSheetTitle) todoSheetTitle.textContent = mode === "triage" ? "Triage this task" : "Clarify the task";
@@ -2753,6 +2920,7 @@ function closeTodoSheet() {
   state.pendingTodoText = "";
   state.pendingTriageTask = null;
   state.todoSheetMode = "capture";
+  state.todoEffort = "";
   if (todoSheetKicker) todoSheetKicker.textContent = "todo capture";
   if (todoSheetTitle) todoSheetTitle.textContent = "Clarify the task";
   if (todoConfirmButton) todoConfirmButton.textContent = "Save todo";
@@ -2768,6 +2936,10 @@ function renderTodoSheetState() {
   todoUrgentButtons.forEach((button) => {
     const isActive = (button.dataset.todoUrgent === "true") === state.todoUrgent;
     button.classList.toggle("is-active", isActive);
+  });
+
+  todoEffortButtons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.todoEffort === state.todoEffort);
   });
 
   duePresetButtons.forEach((button) => {
@@ -2836,7 +3008,8 @@ function getCaptureSubmissionKey(text, metadata = {}) {
     source: metadata.source || state.pendingChatCaptureSource || "",
     important: metadata.important ?? "",
     urgent: metadata.urgent ?? "",
-    due: metadata.due || ""
+    due: metadata.due || "",
+    effort: metadata.effort || ""
   };
   return JSON.stringify([normalizedText, normalizedMetadata]);
 }
@@ -3660,126 +3833,106 @@ function renderTasksBadge(count = null) {
 
 function renderDashboard() {
   if (!state.dashboard) return;
-  renderDashboardOverview(state.dashboard);
-  renderDashboardCaptures(state.dashboard.recentCaptures || []);
-  renderMonthlyReviewState();
-  renderDashboardTaskList(dashboardFocusTasks, state.dashboard.highFocusTasks || [], "No high-focus tasks in the current index.");
-  renderDashboardTaskList(dashboardDueSoon, state.dashboard.dueSoonTasks || [], "No due-soon tasks in the current index.");
-  renderDashboardTaskList(dashboardTriage, state.dashboard.triageTasks || [], "No tasks need triage.");
-  renderDashboardRecentNotes(state.dashboard.recentNotes || []);
+  renderPersonalSystemDashboard(state.dashboard.personalSystem || null);
 }
 
-function renderDashboardOverview(data) {
+function renderPersonalSystemDashboard(personalSystem) {
   if (!dashboardOverview) return;
-  const summary = data.taskSummary || {};
+  if (!personalSystem?.available) {
+    dashboardOverview.innerHTML = `
+      <div class="empty-state">
+        <p class="empty-title">Checklist state not found.</p>
+        <p>${escapeHtml(personalSystem?.message || "Create the personal checklist state note to enable cadence nudges.")}</p>
+      </div>
+      ${renderPersonalSystemLinks(personalSystem)}
+    `;
+    if (dashboardCadenceToggle) dashboardCadenceToggle.hidden = true;
+    return;
+  }
+
+  const items = personalSystem.items || [];
+  const visibleItems = state.dashboardShowAllCadence
+    ? items
+    : items.filter((item) => item.status !== "current");
+  if (dashboardCadenceToggle) {
+    dashboardCadenceToggle.hidden = items.every((item) => item.status !== "current");
+    dashboardCadenceToggle.textContent = state.dashboardShowAllCadence ? "Show nudges" : "Show all";
+    dashboardCadenceToggle.setAttribute("aria-expanded", String(state.dashboardShowAllCadence));
+  }
   dashboardOverview.innerHTML = `
-    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="do-now" aria-label="Show do now tasks">
-      <span class="overview-value">${numberFormat(summary.doNowCount)}</span>
-      <span class="overview-label">Do now</span>
-    </button>
-    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="schedule" aria-label="Show scheduled tasks">
-      <span class="overview-value">${numberFormat(summary.scheduleCount)}</span>
-      <span class="overview-label">Schedule</span>
-    </button>
-    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="quick" aria-label="Show quick tasks">
-      <span class="overview-value">${numberFormat(summary.quickCount)}</span>
-      <span class="overview-label">Quick</span>
-    </button>
-    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="someday" aria-label="Show someday tasks">
-      <span class="overview-value">${numberFormat(summary.somedayCount)}</span>
-      <span class="overview-label">Someday</span>
-    </button>
-    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="due-soon" aria-label="Show due soon tasks">
-      <span class="overview-value">${numberFormat(summary.dueSoonCount)}</span>
-      <span class="overview-label">Due soon</span>
-    </button>
-    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="high" aria-label="Show high focus tasks">
-      <span class="overview-value">${numberFormat(summary.highCount)}</span>
-      <span class="overview-label">High focus</span>
-    </button>
-    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="triage" aria-label="Show tasks needing triage">
-      <span class="overview-value">${numberFormat(summary.triageCount)}</span>
-      <span class="overview-label">Needs triage</span>
-    </button>
-    <button class="overview-tile overview-link" type="button" data-dashboard-task-scope="all" data-dashboard-task-focus="all" aria-label="Show all open tasks">
-      <span class="overview-value">${numberFormat(summary.openCount)}</span>
-      <span class="overview-label">Open tasks</span>
-    </button>
+    <div class="cadence-summary">
+      <div>
+        <span>${numberFormat(personalSystem.attentionCount || 0)}</span>
+        <p>Needs attention</p>
+      </div>
+      <div>
+        <span>${numberFormat(personalSystem.currentCount || 0)}</span>
+        <p>Current</p>
+      </div>
+    </div>
+    <div class="cadence-list">
+      ${visibleItems.length ? visibleItems.map(renderCadenceItem).join("") : `
+        <div class="empty-state compact-empty">
+          <p class="empty-title">All personal cadences are current.</p>
+          <p>Nothing needs a nudge right now.</p>
+        </div>
+      `}
+    </div>
+    ${renderPersonalSystemLinks(personalSystem)}
   `;
 }
 
-function renderDashboardCaptures(captures) {
-  if (!dashboardCaptures) return;
-  if (!captures.length) {
-    dashboardCaptures.innerHTML = `<p class="quiet-line">No recent captures yet.</p>`;
-    return;
-  }
-  dashboardCaptures.innerHTML = captures.map((capture) => `
-    <article class="mini-row">
-      <span class="mini-type mini-${escapeHtml(capture.category)}">${escapeHtml(capture.category)}</span>
-      <p>${escapeHtml(capture.text)}</p>
-      ${capture.category === "todo" ? renderTaskBadges(capture.metadata || {}) : ""}
-    </article>
-  `).join("");
-}
-
-function renderMonthlyReviewState() {
-  if (monthlyReviewButton) {
-    monthlyReviewButton.disabled = state.monthlyReviewGenerating;
-    monthlyReviewButton.textContent = state.monthlyReviewGenerating ? "Reviewing..." : "Review";
-  }
-  if (!monthlyReviewStatus) return;
-  if (state.monthlyReviewGenerating) {
-    monthlyReviewStatus.textContent = "Reviewing this month's fleeting note...";
-    return;
-  }
-  if (state.monthlyReviewPath) {
-    monthlyReviewStatus.innerHTML = `
-      Draft created:
-      <button class="inline-note-link" type="button" data-open-note="${escapeHtml(state.monthlyReviewPath)}">
-        ${escapeHtml(state.monthlyReviewPath)}
+function renderCadenceItem(item) {
+  const status = item.status || "current";
+  return `
+    <article class="cadence-item cadence-${escapeHtml(status)}">
+      <div>
+        <div class="cadence-item-head">
+          <strong>${escapeHtml(item.label || item.key || "Cadence")}</strong>
+          <span>${escapeHtml(formatCadenceStatus(item))}</span>
+        </div>
+        <p>${escapeHtml(formatCadenceDetail(item))}</p>
+      </div>
+      <button class="secondary-button compact-button" type="button" data-cadence-prompt="${escapeHtml(item.actionPrompt || "")}">
+        Run
       </button>
-    `;
-    return;
-  }
-  monthlyReviewStatus.textContent = "Create a draft review from this month's fleeting note.";
+    </article>
+  `;
 }
 
-function renderDashboardTaskList(target, tasks, emptyMessage) {
-  if (!target) return;
-  if (!tasks.length) {
-    target.innerHTML = `<p class="quiet-line">${escapeHtml(emptyMessage)}</p>`;
-    return;
-  }
-  target.innerHTML = tasks.map((task) => `
-    <article class="mini-row" data-task-id="${escapeHtml(task.id)}" title="Double-click to edit">
-      ${renderTaskSourceInfo(task)}
-      ${renderTaskCheckbox(task)}
-      <p>${escapeHtml(task.text)}</p>
-      ${renderTaskBadges(task)}
-    </article>
-  `).join("");
+function renderPersonalSystemLinks(personalSystem = {}) {
+  const links = [
+    ["Personal System", personalSystem.systemPath],
+    ["Checklist State", personalSystem.statePath],
+    ["Vision", "2.Areas/Personal/vision.md"]
+  ].filter(([, path]) => path);
+  return `
+    <div class="dashboard-note-links" aria-label="Personal system notes">
+      ${links.map(([label, path]) => `
+        <button class="inline-note-link" type="button" data-open-note="${escapeHtml(path)}">${escapeHtml(label)}</button>
+      `).join("")}
+    </div>
+  `;
 }
 
-function renderDashboardRecentNotes(notes) {
-  if (!dashboardRecentNotes) return;
-  if (!notes.length) {
-    dashboardRecentNotes.innerHTML = `<p class="quiet-line">No recent notes found.</p>`;
-    return;
-  }
-  dashboardRecentNotes.innerHTML = notes.map((note) => `
-    <article class="mini-row">
-      <p><strong>${escapeHtml(note.title)}</strong></p>
-      <small>${escapeHtml(note.path)}</small>
-    </article>
-  `).join("");
+function formatCadenceStatus(item) {
+  if (item.status === "not-run") return "Not run";
+  if (item.status === "overdue") return "Overdue";
+  return "Current";
+}
+
+function formatCadenceDetail(item) {
+  const cadence = item.cadence || "Cadence";
+  if (!item.lastRun) return `${cadence} · no last-run date`;
+  const days = Number(item.daysSinceRun);
+  const age = Number.isFinite(days)
+    ? `${days} day${days === 1 ? "" : "s"} ago`
+    : "last run date unavailable";
+  return `${cadence} · last run ${formatShortDate(item.lastRun)} (${age})`;
 }
 
 function renderDashboardLoading() {
-  [dashboardOverview, dashboardCaptures, dashboardFocusTasks, dashboardDueSoon, dashboardTriage, dashboardRecentNotes].forEach((target) => {
-    if (target) target.innerHTML = `<p class="quiet-line">Loading...</p>`;
-  });
-  renderMonthlyReviewState();
+  if (dashboardOverview) dashboardOverview.innerHTML = `<p class="quiet-line">Loading cadence state...</p>`;
 }
 
 function renderDashboardError(message) {
@@ -3823,8 +3976,8 @@ function initializeSprintOpenObjectives() {
 function renderPersonalSprint() {
   if (!sprintContent || !state.personalSprint) return;
   const { sprint, okr, focus } = state.personalSprint;
+  renderSprintViewTabs(sprint);
   sprintContent.innerHTML = `
-    ${renderSprintViewTabs(sprint)}
     <section class="sprint-card active-sprint-card ${sprint.isStale ? "is-stale" : ""}">
       <div class="sprint-card-head">
         <div>
@@ -3845,7 +3998,7 @@ function renderPersonalSprint() {
       <div class="sprint-checkboxes" aria-label="Weekly sprint checkboxes">
         ${(sprint.weeklyCheckboxes || []).map(renderSprintCheckbox).join("")}
       </div>
-      <p class="sprint-count">Activity logs this sprint: <strong>${numberFormat(sprint.activeActivityCount)}</strong></p>
+      ${renderSprintProgress(sprint.activeProgress)}
       ${renderSprintSignals(sprint)}
     </section>
 
@@ -3914,12 +4067,24 @@ function renderSprintSignals(sprint) {
   `;
 }
 
-function renderSprintViewTabs(sprint) {
-  const views = sprint.availableViews || [];
-  if (views.length <= 1) return "";
+function renderSprintProgress(progress = {}) {
   return `
-    <div class="sprint-view-tabs" role="tablist" aria-label="Sprint views">
-      ${views.map((item) => `
+    <div class="sprint-progress-block" aria-label="Active sprint progress">
+      <div class="progress-copy">
+        <span>${escapeHtml(progress.label || "No progress yet")}</span>
+        <strong>${numberFormat(progress.percent || 0)}%</strong>
+      </div>
+      ${renderProgressBar(progress, "sprint-progress-bar")}
+    </div>
+  `;
+}
+
+function renderSprintViewTabs(sprint) {
+  if (!sprintViewToggle) return;
+  const views = sprint.availableViews || [];
+  sprintViewToggle.hidden = views.length <= 1;
+  sprintViewToggle.innerHTML = views.length <= 1 ? "" : `
+    ${views.map((item) => `
         <button
           type="button"
           role="tab"
@@ -3931,7 +4096,6 @@ function renderSprintViewTabs(sprint) {
           ${escapeHtml(item.label)}
         </button>
       `).join("")}
-    </div>
   `;
 }
 
@@ -3984,18 +4148,28 @@ function renderOkrKrRow(kr) {
 
 function renderKrProgress(kr) {
   const progress = kr.progress || {};
-  if (progress.kind === "frequency") {
-    return `
-      <span class="okr-progress">
-        <span>${escapeHtml(progress.label)}</span>
-        <span class="dot-progress" aria-hidden="true">${(progress.dots || []).map((done) => `<i class="${done ? "is-filled" : ""}"></i>`).join("")}</span>
-      </span>
-    `;
-  }
-  if (progress.kind === "milestone") {
-    return `<span class="okr-progress milestone-progress">${progress.done ? "✓ Done" : "□ Not done"}</span>`;
-  }
-  return `<span class="okr-progress">${escapeHtml(progress.label || "0 logs")}</span>`;
+  return `
+    <span class="okr-progress">
+      <span>${escapeHtml(progress.label || "No progress")}</span>
+      ${renderProgressBar(progress, "okr-progress-bar")}
+    </span>
+  `;
+}
+
+function renderProgressBar(progress = {}, className = "") {
+  const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
+  return `
+    <span
+      class="progress-bar ${escapeHtml(className)}"
+      role="progressbar"
+      aria-valuemin="0"
+      aria-valuemax="100"
+      aria-valuenow="${escapeHtml(String(Math.round(percent)))}"
+      style="--progress-percent: ${escapeHtml(String(percent))}%"
+    >
+      <span></span>
+    </span>
+  `;
 }
 
 function handleSprintClick(event) {
@@ -4075,6 +4249,43 @@ function openSprintInChat() {
     token: "sprint-plan",
     path: sprint.path
   }]);
+}
+
+async function openSprintCategorizeSession() {
+  if (sprintCategorizeButton) sprintCategorizeButton.disabled = true;
+  try {
+    showToast("Opening categorization chat...");
+    const sprint = state.personalSprint?.sprint;
+    const okr = state.personalSprint?.okr;
+    const focus = state.personalSprint?.focus;
+    const contextItems = [
+      sprint?.path ? {
+        kind: "file",
+        title: "Sprint Plan",
+        name: "Sprint Plan",
+        token: "sprint-plan",
+        path: sprint.path
+      } : null,
+      okr?.path ? {
+        kind: "file",
+        title: "Personal OKRs",
+        name: "Personal OKRs",
+        token: "personal-okrs",
+        path: okr.path
+      } : null,
+      focus?.ledgerPath ? {
+        kind: "file",
+        title: "Idea Ledger",
+        name: "Idea Ledger",
+        token: "idea-ledger",
+        path: focus.ledgerPath
+      } : null
+    ].filter(Boolean);
+
+    await startChatWithPrompt("Categorize fleeting note with domain and activity for pending ones. Identify if any sources are needed", contextItems);
+  } finally {
+    if (sprintCategorizeButton) sprintCategorizeButton.disabled = false;
+  }
 }
 
 function openFocusInChat() {
@@ -4159,11 +4370,19 @@ async function handleSprintChange(event) {
 
 function renderSprintLoading() {
   if (!sprintContent) return;
+  if (sprintViewToggle) {
+    sprintViewToggle.hidden = true;
+    sprintViewToggle.innerHTML = "";
+  }
   sprintContent.innerHTML = `<div class="empty-state"><p class="empty-title">Loading sprint...</p></div>`;
 }
 
 function renderSprintError(message) {
   if (!sprintContent) return;
+  if (sprintViewToggle) {
+    sprintViewToggle.hidden = true;
+    sprintViewToggle.innerHTML = "";
+  }
   sprintContent.innerHTML = `
     <div class="empty-state">
       <p class="empty-title">Sprint unavailable.</p>
@@ -4240,9 +4459,11 @@ function renderSearchError(message) {
 }
 
 function renderTasks() {
-  if (!tasksList || !tasksCount) return;
+  if (!tasksList) return;
   renderTasksBadge();
   renderTaskFilterState();
+  tasksList.classList.toggle("is-matrix", state.taskView === "matrix");
+  tasksList.classList.toggle("is-list", state.taskView !== "matrix");
 
   if (!state.tasks.length) {
     tasksList.innerHTML = `
@@ -4254,19 +4475,77 @@ function renderTasks() {
     return;
   }
 
-  tasksList.innerHTML = state.tasks.map((task) => `
+  tasksList.innerHTML = state.taskView === "matrix"
+    ? renderTaskMatrix()
+    : state.tasks.map(renderTaskRow).join("");
+}
+
+function renderTaskMatrix() {
+  const groups = [
+    { key: "do-now", title: "Do now", description: "Important and urgent" },
+    { key: "schedule", title: "Schedule", description: "Important, not urgent" },
+    { key: "quick", title: "Quick", description: "Urgent, not important" },
+    { key: "someday", title: "Someday", description: "Not urgent or important" },
+    { key: "triage", title: "Needs triage", description: "Missing importance or urgency" }
+  ];
+  return `
+    <div class="task-matrix" aria-label="Eisenhower task matrix">
+      ${groups.map((group) => {
+        const tasks = state.tasks
+          .filter((task) => getTaskMatrixGroup(task) === group.key)
+          .sort((a, b) => sortMatrixTasks(a, b, group.key));
+        return `
+          <section class="task-matrix-column task-matrix-${escapeHtml(group.key)}">
+            <div class="task-matrix-head">
+              <div>
+                <h2>${escapeHtml(group.title)}</h2>
+                <p>${escapeHtml(group.description)}</p>
+              </div>
+              <span>${numberFormat(tasks.length)}</span>
+            </div>
+            <div class="task-matrix-list">
+              ${tasks.length ? tasks.map((task) => renderTaskRow(task, { showQuadrant: false })).join("") : `<p class="quiet-line">No tasks here.</p>`}
+            </div>
+          </section>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function getTaskMatrixGroup(task) {
+  const dueState = getTaskDueState(task?.due);
+  if (dueState === "overdue" || dueState === "today") return "do-now";
+  if (task?.effort === "5m") return "do-now";
+  if (dueState === "future") return "schedule";
+  return task?.quadrant || "triage";
+}
+
+function sortMatrixTasks(a, b, groupKey) {
+  if (groupKey !== "do-now" && groupKey !== "schedule") return 0;
+
+  const aDue = normalizeDueDate(a?.due);
+  const bDue = normalizeDueDate(b?.due);
+  if (aDue && bDue && aDue !== bDue) return aDue.localeCompare(bDue);
+  if (aDue && !bDue) return -1;
+  if (!aDue && bDue) return 1;
+  return 0;
+}
+
+function renderTaskRow(task, options = {}) {
+  return `
     <article class="task-row" data-task-id="${escapeHtml(task.id)}" title="Double-click to edit">
       ${renderTaskSourceInfo(task)}
       ${renderTaskCheckbox(task)}
       <div class="task-main">
         <p>${escapeHtml(task.text)}</p>
         <div class="task-meta">
-          ${renderTaskBadges(task)}
+          ${renderTaskBadges(task, options)}
           ${task.project ? `<span>${escapeHtml(task.project)}</span>` : ""}
         </div>
       </div>
     </article>
-  `).join("");
+  `;
 }
 
 function renderTaskSourceInfo(task) {
@@ -4298,7 +4577,7 @@ function renderTaskCheckbox(task) {
   `;
 }
 
-function renderTaskBadges(task) {
+function renderTaskBadges(task, options = {}) {
   const badges = [];
   const taskId = task.id || null;
   const makeEditable = (badge) => taskId ? {
@@ -4307,13 +4586,14 @@ function renderTaskBadges(task) {
     taskId
   } : badge;
 
-  if (shouldShowQuadrantBadge(task)) {
+  if (shouldShowQuadrantBadge(task, options)) {
     badges.push(makeEditable({ label: formatQuadrant(task.quadrant), className: `task-badge-${task.quadrant}` }));
   }
   if (task.important === true) badges.push(makeEditable({ label: "important", className: "task-badge-important" }));
   if (task.urgent === true) badges.push(makeEditable({ label: "urgent", className: "task-badge-urgent" }));
   if (task.priority) badges.push(makeEditable({ label: task.priority, className: `priority-${String(task.priority).toLowerCase()}` }));
-  if (task.due) badges.push(makeEditable({ label: `due ${task.due}`, className: "task-badge-due" }));
+  if (task.effort === "5m") badges.push(makeEditable({ label: "5 min", className: "task-badge-effort" }));
+  if (task.due) badges.push(makeEditable({ label: formatDueBadgeLabel(task.due), className: `task-badge-due task-badge-due-${getTaskDueState(task.due)}` }));
   if (task.hasTodoMetadata === false || task.quadrant === "triage") {
     badges.push({
       label: "needs triage",
@@ -4337,7 +4617,29 @@ function renderTaskBadges(task) {
   `;
 }
 
-function shouldShowQuadrantBadge(task) {
+function formatDueBadgeLabel(due) {
+  const dueState = getTaskDueState(due);
+  if (dueState === "today") return "due today";
+  if (dueState === "overdue") return `overdue ${due}`;
+  return `due ${due}`;
+}
+
+function getTaskDueState(due) {
+  const normalizedDue = normalizeDueDate(due);
+  if (!normalizedDue) return "none";
+  const today = getLocalDateSlug();
+  if (normalizedDue < today) return "overdue";
+  if (normalizedDue === today) return "today";
+  return "future";
+}
+
+function normalizeDueDate(due) {
+  const value = String(due || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
+}
+
+function shouldShowQuadrantBadge(task, options = {}) {
+  if (options.showQuadrant === false) return false;
   if (!task.quadrant) return false;
   if (task.quadrant === "schedule" && task.due) return false;
   return true;
@@ -4354,16 +4656,33 @@ function formatQuadrant(value) {
 }
 
 function renderTaskFilterState() {
-  if (taskStatusFilter) taskStatusFilter.value = state.taskStatus;
+  taskViewButtons.forEach((button) => {
+    const isActive = button.dataset.taskView === state.taskView;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
   if (taskFocusFilter) taskFocusFilter.value = state.taskFocus;
   if (taskScopeFilter) taskScopeFilter.value = state.taskScope;
   if (taskSourceFilter) taskSourceFilter.value = state.taskSource;
-  taskFilterClearButton?.toggleAttribute("disabled", !hasActiveTaskFilters());
+  if (taskFocusFilter) {
+    taskFocusFilter.disabled = state.taskView === "matrix";
+    taskFocusFilter.closest(".filter-field")?.classList.toggle("is-disabled", state.taskView === "matrix");
+  }
+  const activeFilterCount = getActiveTaskFilterCount();
+  taskFilterClearButton?.toggleAttribute("disabled", !activeFilterCount);
+  if (taskFilterCount) {
+    taskFilterCount.hidden = activeFilterCount === 0;
+    taskFilterCount.textContent = activeFilterCount ? String(activeFilterCount) : "";
+  }
+  if (taskFilterToggle) {
+    taskFilterToggle.classList.toggle("has-active-filters", activeFilterCount > 0);
+    taskFilterToggle.setAttribute("aria-expanded", String(!(taskFilterPanel?.hidden ?? true)));
+  }
 }
 
 function readTaskFiltersFromControls() {
-  state.taskStatus = taskStatusFilter?.value || "open";
-  state.taskFocus = taskFocusFilter?.value || "all";
+  state.taskStatus = "open";
+  if (taskFocusFilter) state.taskFocus = taskFocusFilter.value || "all";
   state.taskScope = taskScopeFilter?.value || "all";
   state.taskSource = taskSourceFilter?.value || "all";
 }
@@ -4376,10 +4695,21 @@ function resetTaskFilters() {
 }
 
 function hasActiveTaskFilters() {
-  return state.taskStatus !== "open"
-    || state.taskFocus !== "all"
-    || state.taskScope !== "all"
-    || state.taskSource !== "all";
+  return getActiveTaskFilterCount() > 0;
+}
+
+function getActiveTaskFilterCount() {
+  let count = 0;
+  if (state.taskView === "list" && state.taskFocus !== "all") count += 1;
+  if (state.taskScope !== "all") count += 1;
+  if (state.taskSource !== "all") count += 1;
+  return count;
+}
+
+function setTaskFiltersOpen(isOpen) {
+  if (!taskFilterPanel || !taskFilterToggle) return;
+  taskFilterPanel.hidden = !isOpen;
+  taskFilterToggle.setAttribute("aria-expanded", String(isOpen));
 }
 
 function renderTasksError(message) {

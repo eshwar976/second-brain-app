@@ -50,12 +50,13 @@ test("todo capture, edit, and triage preserve Obsidian-friendly Markdown", async
       text: "write test task",
       important: true,
       urgent: false,
-      due: "2026-05-12"
+      due: "2026-05-12",
+      effort: "5m"
     });
 
     const monthlyFile = capture.monthlyFile;
     let markdown = await readFile(monthlyFile, "utf8");
-    assert.match(markdown, /^- \[ \] \d{1,2}:\d{2} (?:AM|PM) write test task \[type:: todo] \[important:: true] \[urgent:: false] \[priority:: medium] \[due:: 2026-05-12]$/m);
+    assert.match(markdown, /^- \[ \] \d{1,2}:\d{2} (?:AM|PM) write test task \[type:: todo] \[important:: true] \[urgent:: false] \[priority:: medium] \[due:: 2026-05-12] \[effort:: 5m]$/m);
     assert.doesNotMatch(markdown, /\[created::/);
 
     await postJson(`http://127.0.0.1:${port}/api/index/run`, secret, {});
@@ -63,6 +64,7 @@ test("todo capture, edit, and triage preserve Obsidian-friendly Markdown", async
     assert.equal(tasks.tasks.length, 1);
     assert.equal(tasks.tasks[0].text, "write test task");
     assert.equal(tasks.tasks[0].due, "2026-05-12");
+    assert.equal(tasks.tasks[0].effort, "5m");
 
     await postJson(`http://127.0.0.1:${port}/api/tasks/update`, secret, {
       taskId: tasks.tasks[0].id,
@@ -70,19 +72,147 @@ test("todo capture, edit, and triage preserve Obsidian-friendly Markdown", async
     });
 
     markdown = await readFile(monthlyFile, "utf8");
-    assert.match(markdown, /^- \[ \] \d{1,2}:\d{2} (?:AM|PM) updated test task \[type:: todo] \[important:: true] \[urgent:: false] \[priority:: medium] \[due:: 2026-05-12]$/m);
+    assert.match(markdown, /^- \[ \] \d{1,2}:\d{2} (?:AM|PM) updated test task \[type:: todo] \[important:: true] \[urgent:: false] \[priority:: medium] \[due:: 2026-05-12] \[effort:: 5m]$/m);
 
     const updatedTasks = await getJson(`http://127.0.0.1:${port}/api/tasks`, secret);
     await postJson(`http://127.0.0.1:${port}/api/tasks/triage`, secret, {
       taskId: updatedTasks.tasks[0].id,
       important: false,
       urgent: true,
-      due: ""
+      due: "",
+      effort: ""
     });
 
     markdown = await readFile(monthlyFile, "utf8");
     assert.match(markdown, /^- \[ \] \d{1,2}:\d{2} (?:AM|PM) updated test task \[type:: todo] \[important:: false] \[urgent:: true] \[priority:: medium]$/m);
     assert.doesNotMatch(markdown, /\[due::/);
+    assert.doesNotMatch(markdown, /\[effort::/);
+
+    await postJson(`http://127.0.0.1:${port}/api/captures`, secret, {
+      category: "todo",
+      text: "quick five minute task",
+      important: false,
+      urgent: false,
+      effort: "5m"
+    });
+
+    markdown = await readFile(monthlyFile, "utf8");
+    assert.match(markdown, /^- \[ \] \d{1,2}:\d{2} (?:AM|PM) quick five minute task \[type:: todo] \[important:: false] \[urgent:: false] \[priority:: low] \[effort:: 5m]$/m);
+    assert.doesNotMatch(markdown.match(/^.*quick five minute task.*$/m)?.[0] || "", /\[due::/);
+  } finally {
+    if (server) server.kill("SIGTERM");
+    await rm(vaultPath, { recursive: true, force: true });
+    await rm(appDataPath, { recursive: true, force: true });
+  }
+});
+
+test("recent capture display hides inline metadata fields", async () => {
+  const vaultPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-vault-"));
+  const appDataPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-data-"));
+  const port = String(46500 + Math.floor(Math.random() * 1000));
+  const secret = "test-passcode";
+  let server;
+
+  try {
+    const fleetingDir = path.join(vaultPath, "2.Areas", "Personal", "fleeting");
+    await mkdir(fleetingDir, { recursive: true });
+    const now = new Date();
+    const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const day = `${month}-${String(now.getDate()).padStart(2, "0")}`;
+    await writeFile(path.join(fleetingDir, `${month}.md`), [
+      `## ${day}`,
+      "- 5:55 PM [type:: log] [domain:: finance] [activity:: learning] [source:: [[3.Resources/Sources/die-with-zero|Die With Zero]]] Read a useful chapter",
+      "- 6:10 PM [type:: thought] [[domain:: hobbies]] [activity:: reflection] Build more with less setup"
+    ].join("\n"), "utf8");
+
+    server = spawn(process.execPath, [serverPath.pathname], {
+      cwd: path.dirname(serverPath.pathname),
+      env: {
+        ...process.env,
+        VAULT_PATH: vaultPath,
+        HOST: "127.0.0.1",
+        PORT: port,
+        APP_SECRET: secret,
+        GITHUB_CLIENT_ID: "",
+        GITHUB_CLIENT_SECRET: "",
+        SESSION_SECRET: "",
+        GITHUB_ALLOWED_LOGINS: "",
+        AUTO_INDEX_ON_START: "false",
+        DATA_DIR: appDataPath,
+        INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    await waitForServer(`http://127.0.0.1:${port}/api/health`);
+    const recent = await getJson(`http://127.0.0.1:${port}/api/captures/recent?limit=5`, secret);
+    assert.equal(recent.captures.length, 2);
+    assert.equal(recent.captures[0].displayText, "Build more with less setup");
+    assert.equal(recent.captures[1].displayText, "Read a useful chapter");
+    assert.match(recent.captures[1].content, /\[activity:: learning]/);
+    assert.doesNotMatch(recent.captures[1].displayText, /\[(?:domain|activity|source)::/);
+    assert.doesNotMatch(recent.captures[0].displayText, /\[\[domain::/);
+  } finally {
+    if (server) server.kill("SIGTERM");
+    await rm(vaultPath, { recursive: true, force: true });
+    await rm(appDataPath, { recursive: true, force: true });
+  }
+});
+
+test("dashboard reads personal checklist cadence state", async () => {
+  const vaultPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-vault-"));
+  const appDataPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-data-"));
+  const port = String(46600 + Math.floor(Math.random() * 1000));
+  const secret = "test-passcode";
+  let server;
+
+  try {
+    await mkdir(path.join(vaultPath, "2.Areas", "Personal", "System"), { recursive: true });
+    await mkdir(path.join(vaultPath, "2.Areas", "Personal", "fleeting"), { recursive: true });
+    const today = localDateSlug();
+    const oldDate = localDateSlug(addTestDays(new Date(), -40));
+    await writeFile(path.join(vaultPath, "2.Areas", "Personal", "System", "checklist-state.md"), [
+      "---",
+      "title: Personal Checklist State",
+      `last-fleeting-classification: \"${today}\"`,
+      `last-biweekly-priority: \"${oldDate}\"`,
+      `last-monthly-drift-check: \"${today}\"`,
+      "last-monthly-curation: \"\"",
+      "last-vision-review: \"\"",
+      "last-okr-scoring: \"\"",
+      "---",
+      "# Personal Checklist State"
+    ].join("\n"), "utf8");
+
+    server = spawn(process.execPath, [serverPath.pathname], {
+      cwd: path.dirname(serverPath.pathname),
+      env: {
+        ...process.env,
+        VAULT_PATH: vaultPath,
+        HOST: "127.0.0.1",
+        PORT: port,
+        APP_SECRET: secret,
+        GITHUB_CLIENT_ID: "",
+        GITHUB_CLIENT_SECRET: "",
+        SESSION_SECRET: "",
+        GITHUB_ALLOWED_LOGINS: "",
+        AUTO_INDEX_ON_START: "false",
+        DATA_DIR: appDataPath,
+        INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    await waitForServer(`http://127.0.0.1:${port}/api/health`);
+    const dashboard = await getJson(`http://127.0.0.1:${port}/api/dashboard`, secret);
+    assert.equal(dashboard.personalSystem.available, true);
+    assert.equal(dashboard.personalSystem.statePath, "2.Areas/Personal/System/checklist-state.md");
+    assert.equal(dashboard.personalSystem.systemPath, "2.Areas/Personal/System/Personal System.md");
+    assert.equal(dashboard.personalSystem.items.find((item) => item.key === "last-fleeting-classification").status, "current");
+    assert.equal(dashboard.personalSystem.items.find((item) => item.key === "last-biweekly-priority").status, "overdue");
+    assert.equal(dashboard.personalSystem.items.find((item) => item.key === "last-monthly-curation").status, "not-run");
+    assert.equal(dashboard.personalSystem.items.find((item) => item.key === "last-monthly-curation").actionPrompt, "review my fleeting notes");
+    assert.equal(dashboard.personalSystem.attentionCount, 4);
   } finally {
     if (server) server.kill("SIGTERM");
     await rm(vaultPath, { recursive: true, force: true });
@@ -182,6 +312,13 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
       "    type: habit",
       "    activity: ointment",
       "    status: in-progress",
+      "  - id: \"1.4\"",
+      "    objective: 1",
+      "    objective-title: \"Establish health baseline\"",
+      "    description: \"Schedule annual physical\"",
+      "    type: milestone",
+      "    activity: annual-physical",
+      "    status: done",
       "---",
       "# OKRs"
     ].join("\n"), "utf8");
@@ -195,6 +332,9 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
       "## 2026-05-12",
       "- 8:00 PM [activity:: ointment] second",
       "- 9:00 PM [activity:: gym] lift",
+      "",
+      "## 2026-05-19",
+      "- 9:00 PM [activity:: gym] current week lift",
       "",
       "## 2026-05-26",
       "- 8:00 PM [activity:: ointment] after sprint"
@@ -240,13 +380,29 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
     assert.deepEqual(sprint.sprint.availableViews.map((item) => item.view), ["last", "current", "next"]);
     assert.equal(sprint.sprint.activeKr, "1.3");
     assert.equal(sprint.sprint.activeActivityCount, 2);
+    assert.deepEqual(sprint.sprint.activeProgress, {
+      kind: "habit",
+      count: 2,
+      current: 2,
+      target: 15,
+      percent: 13,
+      label: "2/15 days logged"
+    });
     assert.equal(sprint.focus.available, true);
     assert.equal(sprint.focus.title, "SecondBrain Webapp");
     assert.equal(sprint.focus.doneLooksLike, "Focus tab visible between sprint and OKRs");
     assert.equal(sprint.focus.ideaPath, "2.Areas/Personal/Ideas/secondbrain-webapp/idea.md");
     assert.equal(sprint.focus.ledgerPath, "2.Areas/Personal/Ideas/idea-ledger.md");
     assert.equal(sprint.okr.objectives.length, 1);
-    assert.equal(sprint.okr.objectives[0].keyResults[1].progress.count, 2);
+    assert.equal(sprint.okr.objectives[0].keyResults[0].progress.current, 1);
+    assert.equal(sprint.okr.objectives[0].keyResults[0].progress.target, 3);
+    assert.equal(sprint.okr.objectives[0].keyResults[0].progress.percent, 33);
+    assert.equal(sprint.okr.objectives[0].keyResults[1].progress.current, 2);
+    assert.equal(sprint.okr.objectives[0].keyResults[1].progress.target, 15);
+    assert.equal(sprint.okr.objectives[0].keyResults[1].progress.percent, 13);
+    assert.equal(sprint.okr.objectives[0].keyResults[2].progress.current, 1);
+    assert.equal(sprint.okr.objectives[0].keyResults[2].progress.target, 1);
+    assert.equal(sprint.okr.objectives[0].keyResults[2].progress.percent, 100);
 
     const lastSprint = await getJson(`http://127.0.0.1:${port}/api/personal-sprint?view=last`, secret);
     assert.equal(lastSprint.sprint.path, "2.Areas/Personal/OKRs/FY2027/Q0/sprints/sprint-2026-04-01.md");
@@ -559,6 +715,19 @@ function waitForExit(child) {
   return new Promise((resolve) => {
     child.on("exit", (code) => resolve({ code, stderr }));
   });
+}
+
+function localDateSlug(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function addTestDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
 }
 
 async function getJson(url, secret = "") {

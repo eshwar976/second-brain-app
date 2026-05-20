@@ -1,9 +1,9 @@
-const CACHE_NAME = "second-brain-shell-v47";
+const CACHE_NAME = "second-brain-shell";
 const SHELL_ASSETS = [
   "/",
   "/index.html",
-  "/styles.css?v=47",
-  "/app.js?v=47",
+  "/styles.css",
+  "/app.js",
   "/manifest.webmanifest",
   "/icon.svg"
 ];

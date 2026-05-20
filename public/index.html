@@ -21,7 +21,7 @@
         }
       })();
     </script>
-    <link rel="stylesheet" href="/styles.css?v=47" />
+    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="auth-gate" id="auth-gate">
@@ -72,6 +72,12 @@
       </symbol>
       <symbol id="icon-chat" viewBox="0 0 24 24">
         <path d="M5 6.5A3.5 3.5 0 0 1 8.5 3h7A3.5 3.5 0 0 1 19 6.5v4A3.5 3.5 0 0 1 15.5 14H11l-4.5 4v-4A3.5 3.5 0 0 1 5 10.5Z"></path>
+      </symbol>
+      <symbol id="icon-mic" viewBox="0 0 24 24">
+        <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"></path>
+        <path d="M5 10v2a7 7 0 0 0 14 0v-2"></path>
+        <path d="M12 19v3"></path>
+        <path d="M8 22h8"></path>
       </symbol>
       <symbol id="icon-sprint" viewBox="0 0 24 24">
         <path d="M5 5h14"></path>
@@ -149,6 +155,9 @@
                 autocomplete="off"
                 spellcheck="true"
               ></textarea>
+              <button class="speech-button" id="capture-speech-button" type="button" aria-label="Dictate capture" aria-pressed="false" hidden>
+                <svg aria-hidden="true"><use href="#icon-mic"></use></svg>
+              </button>
               <button class="send-button" type="submit" aria-label="Append capture">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 19V5m0 0-6 6m6-6 6 6" />
@@ -199,6 +208,9 @@
                 autocomplete="off"
                 spellcheck="true"
               ></textarea>
+              <button class="speech-button" id="chat-speech-button" type="button" aria-label="Dictate chat message" aria-pressed="false" hidden>
+                <svg aria-hidden="true"><use href="#icon-mic"></use></svg>
+              </button>
               <button class="send-button" id="chat-send-button" type="submit" aria-label="Send chat message">
                 <svg viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12 19V5m0 0-6 6m6-6 6 6" />
@@ -213,34 +225,18 @@
         <section class="tab-panel" data-tab-panel="tasks" aria-label="Tasks" hidden>
           <section class="workspace-view">
             <div class="view-toolbar">
-              <p><span id="tasks-count">0 open</span></p>
-              <div class="toolbar-actions">
-                <button class="secondary-button" id="tasks-refresh-button" type="button">Refresh</button>
+              <div class="toolbar-actions control-strip task-control-strip">
+                <div class="task-view-toggle segmented-control" role="group" aria-label="Task view">
+                  <button class="view-option" type="button" data-task-view="matrix">Matrix</button>
+                  <button class="view-option" type="button" data-task-view="list">List</button>
+                </div>
+                <button class="secondary-button control-button filter-toggle-button" id="task-filter-toggle" type="button" aria-expanded="false" aria-controls="task-filter-panel">
+                  Filter<span id="task-filter-count" hidden></span>
+                </button>
+                <button class="secondary-button control-button" id="tasks-refresh-button" type="button">Refresh</button>
               </div>
             </div>
-            <div class="task-filter-panel" aria-label="Task filters">
-              <label class="filter-field">
-                <span>Status</span>
-                <select id="task-status-filter">
-                  <option value="open">Open</option>
-                  <option value="done">Done</option>
-                  <option value="all">All</option>
-                </select>
-              </label>
-              <label class="filter-field">
-                <span>Focus</span>
-                <select id="task-focus-filter">
-                  <option value="all">All</option>
-                  <option value="do-now">Do now</option>
-                  <option value="schedule">Schedule</option>
-                  <option value="quick">Quick</option>
-                  <option value="someday">Someday</option>
-                  <option value="due">Has due date</option>
-                  <option value="due-soon">Due soon</option>
-                  <option value="high">High focus</option>
-                  <option value="triage">No metadata</option>
-                </select>
-              </label>
+            <div class="task-filter-panel" id="task-filter-panel" aria-label="Task filters" hidden>
               <label class="filter-field">
                 <span>Scope</span>
                 <select id="task-scope-filter">
@@ -272,9 +268,10 @@
         <section class="tab-panel" data-tab-panel="sprint" aria-label="Sprint" hidden>
           <section class="workspace-view sprint-view">
             <div class="view-toolbar">
-              <p>Personal sprint and OKRs.</p>
-              <div class="toolbar-actions">
-                <button class="secondary-button" id="sprint-refresh-button" type="button">Refresh</button>
+              <div class="toolbar-actions control-strip sprint-control-strip">
+                <div class="sprint-view-tabs segmented-control" id="sprint-view-toggle" role="tablist" aria-label="Sprint views"></div>
+                <button class="secondary-button control-button" id="sprint-categorize-button" type="button">Categorize</button>
+                <button class="secondary-button control-button" id="sprint-refresh-button" type="button">Refresh</button>
               </div>
             </div>
             <div class="sprint-content" id="sprint-content">
@@ -289,7 +286,7 @@
         <section class="tab-panel" data-tab-panel="dashboard" aria-label="Dashboard" hidden>
           <section class="workspace-view">
             <div class="view-toolbar">
-              <p>Local index and system overview.</p>
+              <p>System health and personal cadence.</p>
               <div class="toolbar-actions">
                 <button class="secondary-button" id="index-run-button" type="button">Rebuild index</button>
               </div>
@@ -300,35 +297,15 @@
               </div>
             </div>
 
-            <div class="overview-grid" id="dashboard-overview"></div>
-
             <div class="dashboard-grid">
-              <section class="dashboard-section">
-                <h2>Recent captures</h2>
-                <div class="mini-list" id="dashboard-captures"></div>
-              </section>
-              <section class="dashboard-section">
-                <div class="section-heading-row">
-                  <h2>Monthly review</h2>
-                  <button class="secondary-button compact-button" id="monthly-review-button" type="button">Review</button>
-                </div>
-                <p class="quiet-line workflow-status" id="monthly-review-status">Create a draft review from this month's fleeting note.</p>
-              </section>
-              <section class="dashboard-section">
-                <h2>High focus</h2>
-                <div class="mini-list" id="dashboard-focus-tasks"></div>
-              </section>
-              <section class="dashboard-section">
-                <h2>Due soon</h2>
-                <div class="mini-list" id="dashboard-due-soon"></div>
-              </section>
-              <section class="dashboard-section">
-                <h2>Needs triage</h2>
-                <div class="mini-list" id="dashboard-triage"></div>
-              </section>
               <section class="dashboard-section dashboard-section-wide">
-                <h2>Recent notes</h2>
-                <div class="mini-list" id="dashboard-recent-notes"></div>
+                <div class="section-heading-row">
+                  <h2>Personal cadence</h2>
+                  <button class="secondary-button compact-button" id="dashboard-cadence-toggle" type="button" aria-expanded="false">Show all</button>
+                </div>
+                <div class="personal-system-card" id="dashboard-overview">
+                  <p class="quiet-line">Loading cadence state...</p>
+                </div>
               </section>
               <details class="dashboard-section dashboard-section-wide settings-section">
                 <summary class="settings-summary">
@@ -359,19 +336,6 @@
                 </div>
                 <div id="settings-details"></div>
               </details>
-            </div>
-
-            <form class="search-form" id="search-form">
-              <label class="sr-only" for="search-input">Search indexed notes</label>
-              <input id="search-input" type="search" placeholder="Search indexed notes..." autocomplete="off" />
-              <button class="secondary-button" type="submit">Search</button>
-            </form>
-
-            <div class="result-list" id="search-results">
-              <div class="empty-state">
-                <p class="empty-title">Recent notes will appear here.</p>
-                <p>Rebuild the index to populate search.</p>
-              </div>
             </div>
           </section>
         </section>
@@ -433,6 +397,7 @@
           <input id="todo-due" type="date" />
         </label>
         <div class="due-presets" aria-label="Deadline presets">
+          <button class="choice-button" type="button" data-todo-effort="5m">5 min</button>
           <button class="choice-button" type="button" data-due-preset="today">Today</button>
           <button class="choice-button" type="button" data-due-preset="tomorrow">Tomorrow</button>
         </div>
@@ -557,6 +522,6 @@
 
     <div class="toast" id="action-toast" role="status" aria-live="polite" hidden></div>
 
-    <script src="/app.js?v=47" type="module"></script>
+    <script src="/app.js" type="module"></script>
   </body>
 </html>

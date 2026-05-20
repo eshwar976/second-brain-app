@@ -53,6 +53,8 @@ const CHAT_NOTES_DIR = normalizeVaultRelativeDir(process.env.CHAT_NOTES_DIR || "
 const FLEETING_REVIEWS_DIR = normalizeVaultRelativeDir(process.env.FLEETING_REVIEWS_DIR || "3.Resources/gpt/reviews/fleeting");
 const PERSONAL_OKR_ROOT = normalizeVaultRelativeDir(process.env.PERSONAL_OKR_ROOT || "2.Areas/Personal/OKRs");
 const PERSONAL_IDEA_LEDGER_PATH = normalizeVaultRelativeMarkdownPath(process.env.PERSONAL_IDEA_LEDGER_PATH || "2.Areas/Personal/Ideas/idea-ledger.md");
+const PERSONAL_SYSTEM_PATH = normalizeVaultRelativeMarkdownPath(process.env.PERSONAL_SYSTEM_PATH || "2.Areas/Personal/System/Personal System.md");
+const PERSONAL_CHECKLIST_STATE_PATH = normalizeVaultRelativeMarkdownPath(process.env.PERSONAL_CHECKLIST_STATE_PATH || "2.Areas/Personal/System/checklist-state.md");
 const PERSONAL_SPRINT_STATE_PATH = process.env.PERSONAL_SPRINT_STATE_PATH
   ? normalizeVaultRelativeMarkdownPath(process.env.PERSONAL_SPRINT_STATE_PATH)
   : "";
@@ -753,6 +755,7 @@ async function ensureIndexSchema() {
       text TEXT NOT NULL,
       priority TEXT,
       due TEXT,
+      effort TEXT,
       important TEXT,
       urgent TEXT,
       project TEXT,
@@ -771,6 +774,7 @@ async function ensureIndexSchema() {
   `);
   await ensureTaskColumn("important");
   await ensureTaskColumn("urgent");
+  await ensureTaskColumn("effort");
   await ensureNoteColumn("type");
   await ensureNoteColumn("name");
 }
@@ -872,11 +876,11 @@ async function performVaultIndex({ reason = "manual" } = {}) {
     `),
     ...tasks.map((task) => `
       INSERT INTO tasks (
-        task_id, note_id, path, line_number, status, text, priority, due, important, urgent, project, context, updated
+        task_id, note_id, path, line_number, status, text, priority, due, effort, important, urgent, project, context, updated
       ) VALUES (
         ${sqlValue(task.taskId)}, ${sqlValue(task.noteId)}, ${sqlValue(task.path)}, ${task.lineNumber},
         ${sqlValue(task.status)}, ${sqlValue(task.text)}, ${sqlValue(task.priority)}, ${sqlValue(task.due)},
-        ${sqlValue(task.important)}, ${sqlValue(task.urgent)}, ${sqlValue(task.project)}, ${sqlValue(task.context)},
+        ${sqlValue(task.effort)}, ${sqlValue(task.important)}, ${sqlValue(task.urgent)}, ${sqlValue(task.project)}, ${sqlValue(task.context)},
         ${sqlValue(task.updated)}
       );
     `),
@@ -3599,13 +3603,9 @@ function clipText(value, length) {
 
 async function getDashboard() {
   await ensureIndexSchema();
-  const [status, recentNotes, captures, highFocusTasks, dueSoonTasks, triageTasks] = await Promise.all([
+  const [status, personalSystem] = await Promise.all([
     getIndexStatus(),
-    searchNotes("", 6),
-    readRecentCaptures(5),
-    getTasks({ status: "open", scope: "all", focus: "high", limit: 5 }),
-    getTasks({ status: "open", scope: "all", focus: "due-soon", limit: 5 }),
-    getTasks({ status: "open", scope: "all", focus: "triage", limit: 5 })
+    getPersonalSystemDashboard()
   ]);
   const dueSoonCutoff = addDays(new Date(), 7);
   const taskSummary = await dbQuery(`
@@ -3630,11 +3630,94 @@ async function getDashboard() {
   return {
     index: status,
     taskSummary: normalizeTaskSummary(taskSummary[0] || {}),
-    recentCaptures: captures,
-    recentNotes: recentNotes.results,
-    highFocusTasks: highFocusTasks.tasks,
-    dueSoonTasks: dueSoonTasks.tasks,
-    triageTasks: triageTasks.tasks
+    personalSystem
+  };
+}
+
+async function getPersonalSystemDashboard() {
+  const checklistItems = [
+    {
+      key: "last-fleeting-classification",
+      label: "Fleeting classification",
+      cadence: "Biweekly",
+      overdueAfterDays: 21,
+      actionPrompt: "classify my fleeting notes"
+    },
+    {
+      key: "last-biweekly-priority",
+      label: "Sprint priority",
+      cadence: "Biweekly",
+      overdueAfterDays: 21,
+      actionPrompt: "what's my personal priority this sprint?"
+    },
+    {
+      key: "last-monthly-drift-check",
+      label: "Monthly drift check",
+      cadence: "Monthly",
+      overdueAfterDays: 35,
+      actionPrompt: "monthly drift check"
+    },
+    {
+      key: "last-monthly-curation",
+      label: "Monthly curation",
+      cadence: "Monthly",
+      overdueAfterDays: 35,
+      actionPrompt: "review my fleeting notes"
+    },
+    {
+      key: "last-vision-review",
+      label: "Vision review",
+      cadence: "Quarterly",
+      overdueAfterDays: 100,
+      actionPrompt: "review my vision"
+    },
+    {
+      key: "last-okr-scoring",
+      label: "OKR scoring",
+      cadence: "Quarterly",
+      overdueAfterDays: 100,
+      actionPrompt: "score my personal OKRs"
+    }
+  ];
+  const statePath = PERSONAL_CHECKLIST_STATE_PATH;
+  const systemPath = PERSONAL_SYSTEM_PATH;
+  const markdown = await readFileIfExists(resolveVaultRelativePath(statePath));
+  if (!markdown.trim()) {
+    return {
+      available: false,
+      statePath,
+      systemPath,
+      attentionCount: 0,
+      currentCount: 0,
+      items: [],
+      message: "Checklist state note not found."
+    };
+  }
+
+  const { frontmatter } = splitFrontmatter(markdown);
+  const metadata = parseFrontmatter(frontmatter);
+  const today = formatDate(new Date());
+  const items = checklistItems.map((item) => {
+    const lastRun = normalizeIsoDate(metadata[item.key]);
+    const daysSinceRun = lastRun ? daysBetweenIsoDates(lastRun, today) : null;
+    const status = !lastRun
+      ? "not-run"
+      : daysSinceRun > item.overdueAfterDays ? "overdue" : "current";
+    return {
+      ...item,
+      lastRun,
+      daysSinceRun,
+      status
+    };
+  });
+
+  return {
+    available: true,
+    statePath,
+    systemPath,
+    attentionCount: items.filter((item) => item.status !== "current").length,
+    currentCount: items.filter((item) => item.status === "current").length,
+    items
   };
 }
 
@@ -3664,6 +3747,15 @@ async function getPersonalSprint(view = "") {
   const isStale = Boolean(sprintMeta.sprintEnd && today > sprintMeta.sprintEnd);
   const activeKr = okrMeta.keyResults.find((kr) => kr.id === sprintMeta.activeKr) || null;
   const focus = await getPersonalFocusIdea();
+  const activeKrCounts = activityCounts[sprintMeta.activeKrActivity || activeKr?.activity] || { sprintCount: 0, weekCount: 0 };
+  const activeProgress = getPersonalKrProgress(activeKr || {
+    type: sprintMeta.activeKrType,
+    activity: sprintMeta.activeKrActivity,
+    status: sprintMeta.status
+  }, activeKrCounts, {
+    sprintStart: sprintMeta.sprintStart,
+    sprintEnd: sprintMeta.sprintEnd
+  });
 
   return {
     sprint: {
@@ -3681,6 +3773,7 @@ async function getPersonalSprint(view = "") {
       activeKrType: sprintMeta.activeKrType,
       activeKrActivity: sprintMeta.activeKrActivity,
       activeActivityCount: activityCounts[sprintMeta.activeKrActivity]?.sprintCount || 0,
+      activeProgress,
       review: buildSprintReview({ sprintMeta, activeKr, activityCounts, today }),
       preview: buildSprintPreview({ sprintMeta, today }),
       isCurrent: Boolean(sprintMeta.sprintStart && sprintMeta.sprintEnd && today >= sprintMeta.sprintStart && today <= sprintMeta.sprintEnd),
@@ -3702,7 +3795,9 @@ async function getPersonalSprint(view = "") {
       objectives: groupPersonalOkrObjectives({
         keyResults: okrMeta.keyResults,
         activeKr: sprintMeta.activeKr,
-        activityCounts
+        activityCounts,
+        sprintStart: sprintMeta.sprintStart,
+        sprintEnd: sprintMeta.sprintEnd
       })
     },
     focus
@@ -4049,7 +4144,7 @@ async function resolveIdeaLedgerLink(link) {
   return candidates[0];
 }
 
-function groupPersonalOkrObjectives({ keyResults, activeKr, activityCounts }) {
+function groupPersonalOkrObjectives({ keyResults, activeKr, activityCounts, sprintStart = "", sprintEnd = "" }) {
   const grouped = new Map();
   for (const kr of keyResults) {
     const objectiveId = kr.objective || 0;
@@ -4065,7 +4160,7 @@ function groupPersonalOkrObjectives({ keyResults, activeKr, activityCounts }) {
     const nextKr = {
       ...kr,
       isActive: kr.id === activeKr,
-      progress: getPersonalKrProgress(kr, counts)
+      progress: getPersonalKrProgress(kr, counts, { sprintStart, sprintEnd })
     };
     const objective = grouped.get(objectiveId);
     objective.active = objective.active || nextKr.isActive;
@@ -4074,26 +4169,52 @@ function groupPersonalOkrObjectives({ keyResults, activeKr, activityCounts }) {
   return Array.from(grouped.values()).sort((a, b) => a.id - b.id);
 }
 
-function getPersonalKrProgress(kr, counts) {
+function getPersonalKrProgress(kr = {}, counts = {}, { sprintStart = "", sprintEnd = "" } = {}) {
   const done = String(kr.status || "").toLowerCase() === "done";
   if (kr.type === "milestone") {
-    return { kind: "milestone", done, label: done ? "Done" : "Not done" };
+    return {
+      kind: "milestone",
+      done,
+      current: done ? 1 : 0,
+      target: 1,
+      percent: done ? 100 : 0,
+      label: done ? "Done" : "Not done"
+    };
   }
   if (kr.type === "frequency") {
     const target = Number(kr.target || 0);
+    const current = Number(counts.weekCount || 0);
     return {
       kind: "frequency",
-      current: counts.weekCount,
+      current,
       target,
-      label: `${counts.weekCount}/${target || 0} this week`,
+      percent: getProgressPercent(current, target),
+      label: `${current}/${target || 0} this week`,
       dots: target ? Array.from({ length: Math.min(target, 8) }, (_, index) => index < counts.weekCount) : []
     };
   }
+  const current = Number(counts.sprintCount || 0);
+  const target = getInclusiveIsoDateCount(sprintStart, sprintEnd);
   return {
     kind: "habit",
-    count: counts.sprintCount,
-    label: `${counts.sprintCount} log${counts.sprintCount === 1 ? "" : "s"} this sprint`
+    count: current,
+    current,
+    target,
+    percent: getProgressPercent(current, target),
+    label: target ? `${current}/${target} days logged` : `${current} log${current === 1 ? "" : "s"} this sprint`
   };
+}
+
+function getInclusiveIsoDateCount(startIso, endIso) {
+  const diff = getIsoDayDiff(startIso, endIso);
+  return diff === null ? 0 : Math.max(0, diff + 1);
+}
+
+function getProgressPercent(current, target) {
+  const safeTarget = Number(target || 0);
+  if (!safeTarget) return 0;
+  const safeCurrent = Number(current || 0);
+  return Math.max(0, Math.min(100, Math.round((safeCurrent / safeTarget) * 100)));
 }
 
 function buildSprintReview({ sprintMeta, activeKr, activityCounts, today }) {
@@ -4245,7 +4366,7 @@ async function getTasks({ status = "open", scope = "all", source = "all", focus 
     ${whereClause}
   `);
   const rows = await dbQuery(`
-    SELECT task_id, note_id, path, line_number, status, text, priority, due, important, urgent, project, context, updated
+    SELECT task_id, note_id, path, line_number, status, text, priority, due, effort, important, urgent, project, context, updated
     FROM tasks
     ${whereClause}
     ORDER BY
@@ -4272,6 +4393,7 @@ async function getTasks({ status = "open", scope = "all", source = "all", focus 
       text: row.text,
       priority: row.priority || null,
       due: row.due || null,
+      effort: row.effort || null,
       important: normalizeNullableBoolean(row.important),
       urgent: normalizeNullableBoolean(row.urgent),
       hasTodoMetadata: hasTodoMetadata(row),
@@ -4411,7 +4533,7 @@ function joinMarkdownLines(lines, newline) {
 }
 
 function applyTodoMetadataToLine(line, metadata) {
-  const keys = ["type", "important", "urgent", "priority", "due"];
+  const keys = ["type", "important", "urgent", "priority", "due", "effort"];
   let next = line;
   for (const key of keys) {
     next = next.replace(new RegExp(`\\s*\\[${key}::\\s*[^\\]]+\\]`, "ig"), "");
@@ -4422,7 +4544,8 @@ function applyTodoMetadataToLine(line, metadata) {
     `[important:: ${metadata.important ? "true" : "false"}]`,
     `[urgent:: ${metadata.urgent ? "true" : "false"}]`,
     `[priority:: ${metadata.priority}]`,
-    metadata.due ? `[due:: ${metadata.due}]` : ""
+    metadata.due ? `[due:: ${metadata.due}]` : "",
+    metadata.effort ? `[effort:: ${metadata.effort}]` : ""
   ].filter(Boolean);
 
   return `${next.trimEnd()} ${fields.join(" ")}`;
@@ -4677,6 +4800,7 @@ function extractTasks(note, markdown) {
     const urgent = normalizeBooleanString(readInlineMetadata(metadataSource, "urgent"));
     const priority = readInlineMetadata(metadataSource, "priority") || derivePriority({ important, urgent });
     const due = readInlineMetadata(metadataSource, "due");
+    const effort = normalizeEffortInput(readInlineMetadata(metadataSource, "effort"));
     const project = readInlineMetadata(metadataSource, "project") || note.project;
     const text = cleanTaskText(match[3]);
 
@@ -4689,6 +4813,7 @@ function extractTasks(note, markdown) {
       text,
       priority,
       due,
+      effort,
       important,
       urgent,
       project,
@@ -4969,6 +5094,13 @@ function addDays(date, days) {
   return next;
 }
 
+function daysBetweenIsoDates(start, end) {
+  const startDate = new Date(`${start}T00:00:00`);
+  const endDate = new Date(`${end}T00:00:00`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return null;
+  return Math.floor((endDate.getTime() - startDate.getTime()) / 86400000);
+}
+
 function formatTime(date) {
   return new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
@@ -5127,6 +5259,7 @@ function normalizeTodoCaptureMetadata(body) {
   const important = parseBooleanInput(body?.important);
   const urgent = parseBooleanInput(body?.urgent);
   const due = String(body?.due || "").trim();
+  const effort = normalizeEffortInput(body?.effort);
 
   if (due && !/^\d{4}-\d{2}-\d{2}$/.test(due)) {
     throw httpError(400, "Due date must use YYYY-MM-DD.");
@@ -5136,8 +5269,14 @@ function normalizeTodoCaptureMetadata(body) {
     important,
     urgent,
     due: due || "",
+    effort,
     priority: derivePriority({ important: String(important), urgent: String(urgent) })
   };
+}
+
+function normalizeEffortInput(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  return effort === "5m" || effort === "5 min" || effort === "5 minutes" ? "5m" : "";
 }
 
 function parseBooleanInput(value) {
@@ -5157,6 +5296,7 @@ function formatTodo(text, date, metadata = null, source = "") {
     metadata ? `[urgent:: ${metadata.urgent ? "true" : "false"}]` : "",
     metadata?.priority ? `[priority:: ${metadata.priority}]` : "",
     metadata?.due ? `[due:: ${metadata.due}]` : "",
+    metadata?.effort ? `[effort:: ${metadata.effort}]` : "",
     formatCaptureSourceField(source)
   ].filter(Boolean).join(" ");
 
@@ -5291,7 +5431,8 @@ function parseStructuredCaptureLine(line, day) {
           important: important === "true",
           urgent: urgent === "true",
           priority: metadata.priority || derivePriority({ important, urgent }) || "",
-          due: metadata.due || ""
+          due: metadata.due || "",
+          effort: normalizeEffortInput(metadata.effort)
         }
       };
     }
@@ -5330,8 +5471,8 @@ function parseStructuredCaptureLine(line, day) {
 
 function stripCaptureDisplayFields(text) {
   return String(text || "")
-    .replace(/\s*\[\[domain::\s*[^\]]*]]/gi, "")
-    .replace(/\s*\[domain::\s*[^\]]*]/gi, "")
+    .replace(/\s*\[\[[A-Za-z0-9_-]+::\s*[^\]]*]]/g, "")
+    .replace(/\s*\[[A-Za-z0-9_-]+::\s*(?:\[\[[^\]]*]]|[^\]])*]/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
 }
