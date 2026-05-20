@@ -317,6 +317,11 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, await deleteChatSession(body));
     }
 
+    if (url.pathname === "/api/deep-work/sessions" && req.method === "GET") {
+      requireWriteAuth(req);
+      return sendJson(res, 200, await listDeepWorkSessions(Number(url.searchParams.get("limit") || "8")));
+    }
+
     if (url.pathname === "/api/deep-work/start" && req.method === "POST") {
       requireWriteAuth(req);
       const body = await readRequestJson(req);
@@ -1734,6 +1739,132 @@ async function stopDeepWorkSession(body = {}) {
   return { stopped: true, path: sessionPath, status: "completed", updated: now, capture };
 }
 
+async function listDeepWorkSessions(limit = 8) {
+  const dir = resolveVaultRelativePath(DEEP_WORK_SESSIONS_DIR);
+  let files = [];
+  try {
+    files = await listMarkdownFilesRecursive(dir, DEEP_WORK_SESSIONS_DIR);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    return {
+      dir: DEEP_WORK_SESSIONS_DIR,
+      stats: getDeepWorkStats([]),
+      sessions: []
+    };
+  }
+
+  const sessions = [];
+  for (const relativePath of files) {
+    try {
+      const session = await readDeepWorkSessionSummary(relativePath);
+      if (session.type === "deep-work-session") sessions.push(session);
+    } catch {
+      // Ignore malformed or partial files; the history should remain usable.
+    }
+  }
+
+  sessions.sort((a, b) => String(b.updated || b.created || "").localeCompare(String(a.updated || a.created || "")));
+  return {
+    dir: DEEP_WORK_SESSIONS_DIR,
+    stats: getDeepWorkStats(sessions),
+    sessions: sessions.slice(0, Math.max(1, Math.min(Number(limit) || 8, 30)))
+  };
+}
+
+async function listMarkdownFilesRecursive(absDir, relativeDir) {
+  const entries = await fs.readdir(absDir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const absPath = path.join(absDir, entry.name);
+    const relativePath = `${relativeDir}/${entry.name}`.replaceAll("\\", "/");
+    if (entry.isDirectory()) {
+      files.push(...await listMarkdownFilesRecursive(absPath, relativePath));
+    } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+      files.push(relativePath);
+    }
+  }
+  return files;
+}
+
+async function readDeepWorkSessionSummary(relativePath) {
+  const cleanPath = normalizeOptionalDeepWorkSessionPath(relativePath);
+  const markdown = await fs.readFile(resolveVaultRelativePath(cleanPath), "utf8");
+  const { frontmatter, body } = splitFrontmatter(markdown);
+  const metadata = parseFrontmatter(frontmatter);
+  const conversation = extractMarkdownSection(body, "Conversation");
+  const decisions = extractMarkdownSection(body, "Decisions");
+  const tasks = extractMarkdownSection(body, "Tasks");
+  const recap = extractMarkdownSection(body, "Recap");
+  const goal = metadata.goal || findDeepWorkGoal(body) || path.basename(cleanPath, ".md");
+  const created = metadata.created || "";
+  const updated = metadata.updated || metadata.ended || created;
+  const ended = metadata.ended || "";
+  const taskCounts = countMarkdownCheckboxes(tasks);
+  return {
+    id: metadata.id || hash(cleanPath),
+    type: metadata.type || "",
+    goal,
+    title: goal,
+    path: cleanPath,
+    status: metadata.status || "active",
+    created,
+    updated,
+    ended,
+    conversationTurns: countDeepWorkConversationTurns(conversation),
+    decisionsCount: countMeaningfulSectionLines(decisions),
+    tasksOpen: taskCounts.open,
+    tasksDone: taskCounts.done,
+    recapPresent: Boolean(recap.trim()),
+    durationMinutes: getDurationMinutes(created, ended || updated)
+  };
+}
+
+function getDeepWorkStats(sessions) {
+  const sevenDaysAgo = Date.now() - 7 * 86400000;
+  return {
+    total: sessions.length,
+    activeCount: sessions.filter((session) => session.status === "active").length,
+    completedCount: sessions.filter((session) => session.status === "completed").length,
+    last7DaysCount: sessions.filter((session) => {
+      const time = Date.parse(session.updated || session.created || "");
+      return Number.isFinite(time) && time >= sevenDaysAgo;
+    }).length,
+    openTaskCount: sessions.reduce((sum, session) => sum + Number(session.tasksOpen || 0), 0)
+  };
+}
+
+function findDeepWorkGoal(body) {
+  return extractMarkdownSection(body, "Goal").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)[0] || "";
+}
+
+function countDeepWorkConversationTurns(conversation) {
+  return Array.from(String(conversation || "").matchAll(/^###\s+.+?\s+—\s+User\s*$/gim)).length;
+}
+
+function countMeaningfulSectionLines(section) {
+  return String(section || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[-*]\s+/, "").trim())
+    .filter((line) => line && !/^#+\s+/.test(line))
+    .length;
+}
+
+function countMarkdownCheckboxes(section) {
+  const counts = { open: 0, done: 0 };
+  for (const match of String(section || "").matchAll(/^\s*[-*]\s+\[([ xX])]\s+/gm)) {
+    if (match[1].toLowerCase() === "x") counts.done += 1;
+    else counts.open += 1;
+  }
+  return counts;
+}
+
+function getDurationMinutes(startValue, endValue) {
+  const start = Date.parse(startValue || "");
+  const end = Date.parse(endValue || "");
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return Math.round((end - start) / 60000);
+}
+
 function normalizeDeepWorkRecap(value) {
   return String(value || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 4000);
 }
@@ -2927,9 +3058,10 @@ async function getChatReferenceSuggestions(kind, query) {
 
 async function getChatContextSuggestions(query = "") {
   await ensureIndexSchema();
-  const terms = extractContextSuggestionTerms(query);
+  const analysis = analyzeContextSuggestionQuery(query);
+  const terms = analysis.terms;
   if (!terms.length) return { query: "", suggestions: [] };
-  const groups = await Promise.all(terms.flatMap((term) => [
+  const groups = await Promise.all(analysis.lookupTerms.flatMap((term) => [
     getChatSkills(term),
     getChatReferenceSuggestions("people", term),
     getVaultFileSuggestions(term)
@@ -2939,20 +3071,58 @@ async function getChatContextSuggestions(query = "") {
   )))
     .map((item) => ({
       ...item,
-      score: scoreContextSuggestion(item, terms)
+      score: scoreContextSuggestion(item, terms, analysis)
     }))
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || suggestionSortValue(a).localeCompare(suggestionSortValue(b)))
     .slice(0, 8);
-  return { query: terms.join(" "), suggestions };
+  return { query: terms.join(" "), intents: Array.from(analysis.intents), suggestions };
 }
 
-function extractContextSuggestionTerms(query) {
-  return extractSearchTerms(
-    String(query || "")
-      .replace(/(?:^|\s)[#/@][A-Za-z0-9_-]*/g, " ")
-      .replace(/\[\[[^\]]+]]/g, " ")
-  ).slice(0, 5);
+function analyzeContextSuggestionQuery(query) {
+  const text = String(query || "");
+  const cleanText = text
+    .replace(/(?:^|\s)[#/@][A-Za-z0-9_-]*/g, " ")
+    .replace(/\[\[[^\]]+]]/g, " ");
+  const lower = cleanText.toLowerCase();
+  const terms = extractSearchTerms(cleanText);
+  const intents = new Set();
+  const scope = new Set();
+
+  if (/\b(personal|home|self|family|health|hobby|hobbies)\b/.test(lower)) scope.add("personal");
+  if (/\b(career|work|job|corporate|office|professional)\b/.test(lower)) scope.add("career");
+  if (/\b(okrs?|objectives?|key results?|krs?|goals?|quarter|fy20\d{2}|q[1-4])\b/.test(lower)) intents.add("okr");
+  if (/\b(sprint|weekly|this week|next week|last week|retro|retrospective)\b/.test(lower)) intents.add("sprint");
+  if (/\b(deep work|focus session|focused session|recap|decision log|decisions?)\b/.test(lower)) intents.add("deep-work");
+  if (/\b(active idea|idea ledger|ideas?|proposal|concept)\b/.test(lower)) intents.add("idea");
+  if (/\b(about me|personal system|checklist|cadence|identity|profile|changelog)\b/.test(lower)) intents.add("system");
+  if (/\b(person|people|relationship|relationships|who|contact)\b/.test(lower)) intents.add("people");
+  if (/\b(tasks?|todos?|due|deadline|do now|schedule|urgent|important)\b/.test(lower)) intents.add("task");
+  if (intents.has("okr") && /\bsprint\b/.test(lower)) intents.add("sprint");
+
+  const lookupTerms = new Set(terms);
+  for (const intent of intents) {
+    for (const term of getIntentLookupTerms(intent)) lookupTerms.add(term);
+  }
+  for (const item of scope) lookupTerms.add(item);
+
+  return {
+    terms,
+    lookupTerms: Array.from(lookupTerms).slice(0, 10),
+    intents,
+    scope
+  };
+}
+
+function getIntentLookupTerms(intent) {
+  if (intent === "okr") return ["okr", "okrs", "objective", "key-result"];
+  if (intent === "sprint") return ["sprint", "sprint-plan", "sprint-state"];
+  if (intent === "deep-work") return ["deep-work", "focus", "recap"];
+  if (intent === "idea") return ["idea", "ideas", "idea-ledger"];
+  if (intent === "system") return ["about-me", "personal-system", "checklist"];
+  if (intent === "people") return ["people", "person"];
+  if (intent === "task") return ["todo", "task"];
+  return [];
 }
 
 function normalizeContextSuggestionGroup(items = [], fallbackKind) {
@@ -2983,7 +3153,7 @@ function mergeContextSuggestions(items = []) {
   return Array.from(merged.values());
 }
 
-function scoreContextSuggestion(item, terms = []) {
+function scoreContextSuggestion(item, terms = [], analysis = {}) {
   const fields = getSuggestionSearchFields(item).map((value) => slugifyLookup(value)).filter(Boolean);
   const pathText = slugifyLookup(item.path || "");
   let score = getContextKindBoost(item.kind) + Math.min(Number(item.score || 0) / 10, 18);
@@ -3009,10 +3179,98 @@ function scoreContextSuggestion(item, terms = []) {
 
   if (matchedTerms > 1) score += matchedTerms * 70;
   if (matchedTerms === terms.length) score += 90;
-  if (item.kind === "file" && isOkrPromptTerms(terms) && /(?:^|\/)okrs?(?:\/|$)/i.test(item.path || "")) score += 120;
-  if (item.kind === "file" && terms.includes("personal") && /(?:^|\/)personal(?:\/|$)/i.test(item.path || "")) score += 45;
-  if (item.kind === "skill" && isOkrPromptTerms(terms) && !fields.some((field) => field.includes("okr"))) score -= 80;
+  score += getIntentContextBoost(item, terms, analysis, fields, pathText);
   return Math.max(0, score);
+}
+
+function getIntentContextBoost(item, terms = [], analysis = {}, fields = [], pathText = "") {
+  const intents = analysis.intents || new Set();
+  const scope = analysis.scope || new Set();
+  const normalizedPath = String(item.path || "").replaceAll("\\", "/").toLowerCase();
+  const basename = slugifyLookup(path.basename(normalizedPath, ".md"));
+  const isFile = item.kind === "file";
+  const isSkill = item.kind === "skill" || item.kind === "assistant" || item.kind === "mentor";
+  const fieldText = fields.join(" ");
+  let boost = 0;
+
+  if (scope.has("personal")) {
+    if (isPersonalContextPath(normalizedPath)) boost += isFile ? 90 : 18;
+    if (isCareerContextPath(normalizedPath)) boost -= 65;
+  }
+  if (scope.has("career")) {
+    if (isCareerContextPath(normalizedPath)) boost += isFile ? 90 : 18;
+    if (isPersonalContextPath(normalizedPath)) boost -= 45;
+  }
+
+  if (intents.has("okr")) {
+    if (isFile && isOkrContextPath(normalizedPath)) boost += 190;
+    if (isFile && /personal-q\d-fy20\d{2}|okr-q\d-fy\d{2}|sprint-state-q\d-fy20\d{2}/i.test(normalizedPath)) boost += 70;
+    if (isFile && isSprintContextPath(normalizedPath)) boost += 70;
+    if (isSkill) boost += /okr|sprint|planner|manager/.test(fieldText) ? 35 : -180;
+  }
+
+  if (intents.has("sprint")) {
+    if (isFile && isSprintContextPath(normalizedPath)) boost += 180 + getSprintDateProximityBoost(basename);
+    if (isFile && isOkrContextPath(normalizedPath)) boost += 75;
+    if (isSkill) boost += /sprint|okr|planner|manager/.test(fieldText) ? 45 : -90;
+  }
+
+  if (intents.has("deep-work")) {
+    if (isFile && (normalizedPath.includes("/deep-work/") || item.type === "deep-work-session")) boost += 220;
+    if (isSkill) boost += /deep-work|focus|planner|manager/.test(fieldText) ? 35 : -80;
+  }
+
+  if (intents.has("idea")) {
+    if (isFile && normalizedPath.endsWith("2.areas/personal/ideas/idea-ledger.md")) boost += 220;
+    if (isFile && normalizedPath.includes("/ideas/")) boost += 110;
+    if (isSkill) boost += /idea|evaluator|builder/.test(fieldText) ? 55 : -65;
+  }
+
+  if (intents.has("system")) {
+    if (isFile && /about-me|personal-system|checklist-state|vision/.test(pathText)) boost += 180;
+    if (isSkill) boost += /about-me|curator|system/.test(fieldText) ? 55 : -70;
+  }
+
+  if (intents.has("people")) {
+    if (item.kind === "people") boost += 160;
+    if (isFile && /\/people\//.test(normalizedPath)) boost += 100;
+    if (isSkill) boost -= 80;
+  }
+
+  if (intents.has("task")) {
+    if (isFile && /fleeting|sprint|checklist|personal-system/.test(pathText)) boost += 55;
+    if (isSkill) boost += /planner|manager|todo|task/.test(fieldText) ? 45 : -70;
+  }
+
+  if (isFile && /\/templates?\//.test(normalizedPath)) boost -= 160;
+  if (isFile && /(^|\/)(4\.archive|\.trash)(\/|$)/.test(normalizedPath)) boost -= 200;
+  if (isSkill && terms.length && terms.every((term) => term === "personal" || term === "career")) boost -= 70;
+  return boost;
+}
+
+function isPersonalContextPath(relativePath) {
+  return /(^|\/)2\.areas\/personal(\/|$)|(^|\/)3\.resources\/people(\/|$)/i.test(relativePath);
+}
+
+function isCareerContextPath(relativePath) {
+  return /(^|\/)2\.areas\/career(\/|$)|(^|\/)1\.projects(\/|$)/i.test(relativePath);
+}
+
+function isOkrContextPath(relativePath) {
+  return /(^|\/)okrs?(\/|$)|okr|objectives?|key-results?/i.test(relativePath);
+}
+
+function isSprintContextPath(relativePath) {
+  return /(^|\/)sprints?(\/|$)|sprint-state|sprint-plan|sprint-\d{4}-\d{2}-\d{2}/i.test(relativePath);
+}
+
+function getSprintDateProximityBoost(basename) {
+  const match = String(basename || "").match(/sprint-(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return 0;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (Number.isNaN(date.getTime())) return 0;
+  const ageDays = Math.abs(Date.now() - date.getTime()) / 86400000;
+  return Math.max(0, 70 - Math.min(ageDays, 70));
 }
 
 function getContextTermVariants(term) {
@@ -3022,10 +3280,6 @@ function getContextTermVariants(term) {
   if (clean === "okr") variants.add("okrs");
   if (clean === "okrs") variants.add("okr");
   return Array.from(variants);
-}
-
-function isOkrPromptTerms(terms = []) {
-  return terms.some((term) => term === "okr" || term === "okrs");
 }
 
 function getContextKindBoost(kind) {
@@ -3166,6 +3420,7 @@ async function readOpenCodeSkills() {
 async function getVaultFileSuggestions(query = "") {
   await ensureIndexSchema();
   const cleanQuery = normalizeLookupName(query);
+  const analysis = analyzeContextSuggestionQuery(query);
   const rows = await dbQuery(`
     SELECT note_id, path, title, type, name, updated
     FROM notes_metadata
@@ -3174,7 +3429,21 @@ async function getVaultFileSuggestions(query = "") {
   `);
   const suggestions = rows
     .filter((row) => matchesSuggestionQuery(row, cleanQuery))
-    .map((row) => ({ row, score: scoreReferenceSuggestion(row, cleanQuery) }))
+    .map((row) => {
+      const fields = getSuggestionSearchFields(row).map((value) => slugifyLookup(value)).filter(Boolean);
+      const item = {
+        kind: "file",
+        path: row.path,
+        title: row.title,
+        name: row.name || row.title,
+        type: row.type || null,
+        score: scoreReferenceSuggestion(row, cleanQuery)
+      };
+      return {
+        row,
+        score: item.score + getIntentContextBoost(item, analysis.terms, analysis, fields, slugifyLookup(row.path || ""))
+      };
+    })
     .sort((a, b) => b.score - a.score || suggestionSortValue(a.row).localeCompare(suggestionSortValue(b.row)))
     .slice(0, 20)
     .map(({ row, score }) => ({
@@ -3268,18 +3537,41 @@ function normalizeReferenceKind(kind) {
 
 function matchesSuggestionQuery(row, query) {
   if (!query) return true;
-  return getSuggestionSearchFields(row).some((value) => slugifyLookup(value).includes(query));
+  const fields = getSuggestionSearchFields(row).map((value) => slugifyLookup(value)).filter(Boolean);
+  if (fields.some((field) => field.includes(query))) return true;
+  const terms = getSuggestionQueryTerms(query);
+  return terms.length > 1 && terms.every((term) => fields.some((field) => field.includes(term)));
 }
 
 function scoreReferenceSuggestion(row, query) {
   if (!query) return getRecencySuggestionScore(row);
   const fields = getSuggestionSearchFields(row).map((value) => slugifyLookup(value)).filter(Boolean);
-  return fields.reduce((score, field, index) => {
-    if (field === query) return score + 100 - index;
-    if (field.startsWith(query)) return score + 70 - index;
-    if (field.includes(query)) return score + 35 - index;
-    return score;
+  let score = fields.reduce((total, field, index) => {
+    if (field === query) return total + 100 - index;
+    if (field.startsWith(query)) return total + 70 - index;
+    if (field.includes(query)) return total + 35 - index;
+    return total;
   }, getRecencySuggestionScore(row));
+  const terms = getSuggestionQueryTerms(query);
+  if (terms.length > 1) {
+    let matchedTerms = 0;
+    for (const term of terms) {
+      const termScore = fields.reduce((best, field, index) => {
+        if (field === term) return Math.max(best, 56 - index);
+        if (field.startsWith(term)) return Math.max(best, 42 - index);
+        if (field.includes(term)) return Math.max(best, 24 - index);
+        return best;
+      }, 0);
+      if (termScore > 0) matchedTerms += 1;
+      score += termScore;
+    }
+    if (matchedTerms === terms.length) score += 60;
+  }
+  return score;
+}
+
+function getSuggestionQueryTerms(query) {
+  return String(query || "").split("-").map((term) => term.trim()).filter(Boolean);
 }
 
 function getSuggestionSearchFields(row) {
@@ -3603,9 +3895,10 @@ function clipText(value, length) {
 
 async function getDashboard() {
   await ensureIndexSchema();
-  const [status, personalSystem] = await Promise.all([
+  const [status, personalSystem, deepWork] = await Promise.all([
     getIndexStatus(),
-    getPersonalSystemDashboard()
+    getPersonalSystemDashboard(),
+    listDeepWorkSessions(5)
   ]);
   const dueSoonCutoff = addDays(new Date(), 7);
   const taskSummary = await dbQuery(`
@@ -3630,7 +3923,8 @@ async function getDashboard() {
   return {
     index: status,
     taskSummary: normalizeTaskSummary(taskSummary[0] || {}),
-    personalSystem
+    personalSystem,
+    deepWork
   };
 }
 
@@ -5577,12 +5871,18 @@ async function serveStatic(requestPath, res) {
 
   try {
     const data = await fs.readFile(filePath);
-    res.writeHead(200, { "Content-Type": getContentType(filePath) });
+    res.writeHead(200, {
+      "Content-Type": getContentType(filePath),
+      "Cache-Control": "no-store"
+    });
     res.end(data);
   } catch (error) {
     if (error.code === "ENOENT") {
       const index = await fs.readFile(path.join(PUBLIC_DIR, "index.html"));
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store"
+      });
       return res.end(index);
     }
     throw error;

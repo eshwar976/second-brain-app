@@ -185,6 +185,8 @@ const taskViewButtons = Array.from(document.querySelectorAll("[data-task-view]")
 const captureViewButtons = Array.from(document.querySelectorAll("[data-capture-view]"));
 const dashboardOverview = document.querySelector("#dashboard-overview");
 const dashboardCadenceToggle = document.querySelector("#dashboard-cadence-toggle");
+const dashboardDeepWork = document.querySelector("#dashboard-deep-work");
+const dashboardDeepWorkRefresh = document.querySelector("#dashboard-deep-work-refresh");
 const sprintContent = document.querySelector("#sprint-content");
 const sprintViewToggle = document.querySelector("#sprint-view-toggle");
 const sprintCategorizeButton = document.querySelector("#sprint-categorize-button");
@@ -220,6 +222,7 @@ init();
 async function init() {
   initTheme();
   initAuth();
+  initMobileViewport();
   initTaskView();
   initDeepWork();
   initChatContextMemory();
@@ -377,7 +380,10 @@ function wireInteractions() {
     scheduleSuggestedChatContext();
   });
   chatText?.addEventListener("pointerdown", () => setComposerFocus(true));
-  chatText?.addEventListener("focus", () => setComposerFocus(true));
+  chatText?.addEventListener("focus", () => {
+    setComposerFocus(true);
+    scheduleChatScrollToBottom();
+  });
   chatText?.addEventListener("blur", () => window.setTimeout(() => setComposerFocus(false), 80));
 
   chatText?.addEventListener("click", updateChatSuggestions);
@@ -692,6 +698,30 @@ function wireInteractions() {
     }
   });
 
+  dashboardDeepWork?.addEventListener("click", async (event) => {
+    const resumeButton = event.target.closest("[data-deep-work-resume]");
+    if (resumeButton) {
+      event.preventDefault();
+      await resumeDeepWorkSession(resumeButton.dataset.deepWorkResume || "", resumeButton.dataset.deepWorkGoal || "");
+      return;
+    }
+
+    const chatButton = event.target.closest("[data-deep-work-chat]");
+    if (chatButton) {
+      event.preventDefault();
+      openDeepWorkSessionInChat(chatButton.dataset.deepWorkChat || "", chatButton.dataset.deepWorkGoal || "");
+      return;
+    }
+
+    const noteButton = event.target.closest("[data-open-note]");
+    if (noteButton) {
+      event.preventDefault();
+      openObsidianNote(noteButton.dataset.openNote || "");
+    }
+  });
+
+  dashboardDeepWorkRefresh?.addEventListener("click", loadDashboard);
+
   dashboardCadenceToggle?.addEventListener("click", () => {
     state.dashboardShowAllCadence = !state.dashboardShowAllCadence;
     renderDashboard();
@@ -700,6 +730,33 @@ function wireInteractions() {
   searchForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     await runSearch();
+  });
+}
+
+function initMobileViewport() {
+  const updateViewport = () => {
+    const viewport = window.visualViewport;
+    const height = viewport?.height || window.innerHeight;
+    document.documentElement.style.setProperty("--app-height", `${Math.round(height)}px`);
+  };
+  updateViewport();
+  window.addEventListener("resize", updateViewport, { passive: true });
+  window.addEventListener("orientationchange", updateViewport, { passive: true });
+  window.visualViewport?.addEventListener("resize", () => {
+    updateViewport();
+    scheduleChatScrollToBottom();
+  }, { passive: true });
+  window.visualViewport?.addEventListener("scroll", () => {
+    updateViewport();
+    scheduleChatScrollToBottom();
+  }, { passive: true });
+}
+
+function scheduleChatScrollToBottom() {
+  const activeTab = document.querySelector("[data-tab-panel].is-active")?.dataset.tabPanel;
+  if (!chatTimeline || activeTab !== "chat") return;
+  window.requestAnimationFrame(() => {
+    chatTimeline.scrollTop = chatTimeline.scrollHeight;
   });
 }
 
@@ -712,9 +769,11 @@ function setComposerFocus(isFocused) {
 
 function registerServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
-  navigator.serviceWorker.register("/sw.js").catch(() => {
-    // PWA install support is a convenience; the app should stay quiet if registration is blocked.
-  });
+  navigator.serviceWorker.register("/sw.js")
+    .then((registration) => registration.update().catch(() => {}))
+    .catch(() => {
+      // PWA install support is a convenience; the app should stay quiet if registration is blocked.
+    });
 }
 
 function initAuth() {
@@ -3834,6 +3893,7 @@ function renderTasksBadge(count = null) {
 function renderDashboard() {
   if (!state.dashboard) return;
   renderPersonalSystemDashboard(state.dashboard.personalSystem || null);
+  renderDeepWorkDashboard(state.dashboard.deepWork || null);
 }
 
 function renderPersonalSystemDashboard(personalSystem) {
@@ -3915,6 +3975,109 @@ function renderPersonalSystemLinks(personalSystem = {}) {
   `;
 }
 
+function renderDeepWorkDashboard(deepWork) {
+  if (!dashboardDeepWork) return;
+  const sessions = deepWork?.sessions || [];
+  const stats = deepWork?.stats || {};
+  dashboardDeepWork.innerHTML = `
+    <div class="deep-work-summary">
+      <div>
+        <span>${numberFormat(stats.last7DaysCount || 0)}</span>
+        <p>This week</p>
+      </div>
+      <div>
+        <span>${numberFormat(stats.activeCount || 0)}</span>
+        <p>Active</p>
+      </div>
+      <div>
+        <span>${numberFormat(stats.openTaskCount || 0)}</span>
+        <p>Open tasks</p>
+      </div>
+    </div>
+    <div class="deep-work-history-list">
+      ${sessions.length ? sessions.map(renderDeepWorkHistoryItem).join("") : `
+        <div class="empty-state compact-empty">
+          <p class="empty-title">No Deep Work sessions yet.</p>
+          <p>Start one from Chat when you want a focused thinking trail.</p>
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function renderDeepWorkHistoryItem(session) {
+  const status = session.status || "active";
+  const updated = session.updated || session.created || "";
+  const detail = [
+    status === "completed" ? "Completed" : "Active",
+    session.conversationTurns ? `${numberFormat(session.conversationTurns)} turn${session.conversationTurns === 1 ? "" : "s"}` : "",
+    session.durationMinutes ? formatDurationMinutes(session.durationMinutes) : "",
+    updated ? formatSessionUpdated(updated) : ""
+  ].filter(Boolean).join(" · ");
+  const taskText = Number(session.tasksOpen || 0) || Number(session.tasksDone || 0)
+    ? `${numberFormat(session.tasksDone || 0)} done / ${numberFormat(session.tasksOpen || 0)} open`
+    : "No tracked tasks";
+  return `
+    <article class="deep-work-history-item deep-work-history-${escapeHtml(status)}">
+      <div>
+        <div class="deep-work-history-head">
+          <strong>${escapeHtml(session.goal || "Deep Work session")}</strong>
+          <span>${escapeHtml(status)}</span>
+        </div>
+        <p>${escapeHtml(detail || "No session metadata")}</p>
+        <small>${escapeHtml(taskText)}${session.recapPresent ? " · recap saved" : ""}</small>
+      </div>
+      <div class="deep-work-history-actions">
+        <button class="secondary-button compact-button" type="button" data-deep-work-resume="${escapeHtml(session.path)}" data-deep-work-goal="${escapeHtml(session.goal || "")}">Resume</button>
+        <button class="secondary-button compact-button" type="button" data-deep-work-chat="${escapeHtml(session.path)}" data-deep-work-goal="${escapeHtml(session.goal || "")}">Chat</button>
+        <button class="secondary-button compact-button" type="button" data-open-note="${escapeHtml(session.path)}">Open</button>
+      </div>
+    </article>
+  `;
+}
+
+function formatDurationMinutes(minutes) {
+  const total = Number(minutes);
+  if (!Number.isFinite(total) || total <= 0) return "";
+  if (total < 60) return `${Math.round(total)}m`;
+  const hours = Math.floor(total / 60);
+  const remainder = Math.round(total % 60);
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+async function resumeDeepWorkSession(sessionPath, goal) {
+  const cleanGoal = String(goal || "").trim();
+  if (!sessionPath || !cleanGoal) return;
+  try {
+    const data = await postJson("/api/deep-work/start", {
+      goal: cleanGoal,
+      sessionPath
+    });
+    state.deepWorkSessionPath = data.path || sessionPath;
+    state.deepWorkGoal = data.goal || cleanGoal;
+    state.deepWorkEnabled = true;
+    window.localStorage.setItem(DEEP_WORK_GOAL_STORAGE_KEY, state.deepWorkGoal);
+    window.localStorage.setItem(DEEP_WORK_ENABLED_STORAGE_KEY, "true");
+    window.localStorage.setItem(DEEP_WORK_SESSION_STORAGE_KEY, state.deepWorkSessionPath);
+    renderDeepWorkState();
+    setActiveTab("chat");
+    flashChatHelper("Deep Work session resumed.");
+  } catch (error) {
+    showToast(error.message, { duration: 2600 });
+  }
+}
+
+function openDeepWorkSessionInChat(sessionPath, goal) {
+  if (!sessionPath) return;
+  startChatWithDraft(`Let's continue from this Deep Work session: ${goal || "focus session"}`, [{
+    kind: "file",
+    title: goal || "Deep Work session",
+    name: goal || "Deep Work session",
+    token: "deep-work-session",
+    path: sessionPath
+  }]);
+}
+
 function formatCadenceStatus(item) {
   if (item.status === "not-run") return "Not run";
   if (item.status === "overdue") return "Overdue";
@@ -3933,6 +4096,7 @@ function formatCadenceDetail(item) {
 
 function renderDashboardLoading() {
   if (dashboardOverview) dashboardOverview.innerHTML = `<p class="quiet-line">Loading cadence state...</p>`;
+  if (dashboardDeepWork) dashboardDeepWork.innerHTML = `<p class="quiet-line">Loading Deep Work history...</p>`;
 }
 
 function renderDashboardError(message) {
@@ -3943,6 +4107,9 @@ function renderDashboardError(message) {
         <p>${escapeHtml(message)}</p>
       </div>
     `;
+  }
+  if (dashboardDeepWork) {
+    dashboardDeepWork.innerHTML = `<p class="quiet-line">${escapeHtml(message)}</p>`;
   }
 }
 

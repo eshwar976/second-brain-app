@@ -159,6 +159,93 @@ test("recent capture display hides inline metadata fields", async () => {
   }
 });
 
+test("chat context suggestions prioritize intent-matched vault files over generic skills", async () => {
+  const vaultPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-vault-"));
+  const appDataPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-data-"));
+  const port = String(46000 + Math.floor(Math.random() * 1000));
+  const secret = "test-passcode";
+  let server;
+
+  try {
+    await mkdir(path.join(vaultPath, "2.Areas", "Personal", "OKRs", "FY2027", "Q1", "sprints"), { recursive: true });
+    await mkdir(path.join(vaultPath, "2.Areas", "Personal", "Ideas"), { recursive: true });
+    await mkdir(path.join(vaultPath, ".agents", "skills", "personal-idea-evaluator"), { recursive: true });
+    await mkdir(path.join(vaultPath, ".agents", "skills", "okr-planner"), { recursive: true });
+    await writeFile(path.join(vaultPath, "2.Areas", "Personal", "OKRs", "FY2027", "Q1", "personal-Q1-FY2027.md"), [
+      "---",
+      "title: Personal Q1 FY2027 OKRs",
+      "type: okr",
+      "---",
+      "# Personal Q1 FY2027 OKRs",
+      "",
+      "## Objectives",
+      "- Build a calm personal operating system."
+    ].join("\n"));
+    await writeFile(path.join(vaultPath, "2.Areas", "Personal", "OKRs", "FY2027", "Q1", "sprints", "sprint-2026-05-11.md"), [
+      "---",
+      "title: Sprint 2026-05-11",
+      "type: sprint",
+      "---",
+      "# Sprint 2026-05-11"
+    ].join("\n"));
+    await writeFile(path.join(vaultPath, "2.Areas", "Personal", "Ideas", "idea-ledger.md"), [
+      "# Idea Ledger",
+      "",
+      "## Active (1 slot only)",
+      "| Idea | Done Looks Like | Started |",
+      "|---|---|---|"
+    ].join("\n"));
+    await writeFile(path.join(vaultPath, ".agents", "skills", "personal-idea-evaluator", "SKILL.md"), [
+      "---",
+      "name: personal-idea-evaluator",
+      "description: Evaluate personal ideas.",
+      "---",
+      "# Personal Idea Evaluator"
+    ].join("\n"));
+    await writeFile(path.join(vaultPath, ".agents", "skills", "okr-planner", "SKILL.md"), [
+      "---",
+      "name: okr-planner",
+      "description: Help plan and review OKRs.",
+      "---",
+      "# OKR Planner"
+    ].join("\n"));
+
+    server = spawn(process.execPath, [serverPath.pathname], {
+      cwd: path.dirname(serverPath.pathname),
+      env: {
+        ...process.env,
+        VAULT_PATH: vaultPath,
+        HOST: "127.0.0.1",
+        PORT: port,
+        APP_SECRET: secret,
+        GITHUB_CLIENT_ID: "",
+        GITHUB_CLIENT_SECRET: "",
+        SESSION_SECRET: "",
+        GITHUB_ALLOWED_LOGINS: "",
+        AUTO_INDEX_ON_START: "false",
+        DATA_DIR: appDataPath,
+        INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    await waitForServer(`http://127.0.0.1:${port}/api/health`);
+    await postJson(`http://127.0.0.1:${port}/api/index/run`, secret, {});
+
+    const context = await getJson(`http://127.0.0.1:${port}/api/chat/context-suggestions?q=${encodeURIComponent("what are my personal okrs")}`, secret);
+    assert.equal(context.suggestions[0].kind, "file");
+    assert.match(context.suggestions[0].path, /2\.Areas\/Personal\/OKRs\/FY2027\/Q1\/personal-Q1-FY2027\.md/);
+    assert.notEqual(context.suggestions[0].token, "personal-idea-evaluator");
+
+    const filePicker = await getJson(`http://127.0.0.1:${port}/api/chat/references?kind=file&q=okr`, secret);
+    assert.match(filePicker.suggestions[0].path, /2\.Areas\/Personal\/OKRs\/FY2027\/Q1\/personal-Q1-FY2027\.md/);
+  } finally {
+    if (server) server.kill("SIGTERM");
+    await rm(vaultPath, { recursive: true, force: true });
+    await rm(appDataPath, { recursive: true, force: true });
+  }
+});
+
 test("dashboard reads personal checklist cadence state", async () => {
   const vaultPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-vault-"));
   const appDataPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-data-"));

@@ -84,10 +84,14 @@ Done:
 - End Deep Work flow writes a recap.
 - Optional recap reflection capture into fleeting notes.
 - Deep Work context is included in chat prompts and suggestion bias.
+- Deep Work dashboard/history view:
+  - recent sessions read from Markdown
+  - weekly/active/open-task summary
+  - resume, open in chat, and open note actions
 
 Left:
 - Optional: link specific notes/projects to a Deep Work session from the UI.
-- Optional: Deep Work dashboard/history view.
+- Optional: deeper Deep Work analytics once usage patterns are clearer.
 
 ## Phase 4A: Sprint/OKR Expansion
 
@@ -137,6 +141,13 @@ Done:
 - Added pinned/favorite context chips.
 - Added suggested context hide/dismiss controls.
 - Added Deep Work suggestion bias toward active Deep Work log and current sprint.
+- Added intent-aware context ranking for common OpenCode chat prompts:
+  - personal/career scope
+  - OKRs and sprints
+  - Deep Work sessions
+  - active ideas / idea ledger
+  - personal system / about-me / checklist notes
+  - people and task-oriented prompts
 - Context drawer now groups:
   - Selected
   - Pinned
@@ -155,7 +166,7 @@ Done:
 Left:
 - Optional: favorite management UI beyond pin/unpin inside drawer.
 - Optional: source preview snippets inside the context drawer.
-- Optional: more ranking tuning as real usage reveals patterns.
+- Optional: more ranking tuning only if real usage reveals missed or noisy suggestions.
 
 ## Phase 5: AI Workflows
 
