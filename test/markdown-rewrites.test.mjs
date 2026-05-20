@@ -691,6 +691,83 @@ test("protected endpoints reject unauthenticated requests", async () => {
   }
 });
 
+test("auth mode can use GitHub for public host and passcode for LAN host", async () => {
+  const vaultPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-vault-"));
+  const appDataPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-data-"));
+  const port = String(50500 + Math.floor(Math.random() * 1000));
+  const secret = "test-passcode";
+  let server;
+
+  try {
+    await mkdir(path.join(vaultPath, "2.Areas", "Personal", "fleeting"), { recursive: true });
+    server = spawn(process.execPath, [serverPath.pathname], {
+      cwd: path.dirname(serverPath.pathname),
+      env: {
+        ...process.env,
+        VAULT_PATH: vaultPath,
+        HOST: "127.0.0.1",
+        PORT: port,
+        APP_SECRET: secret,
+        GITHUB_CLIENT_ID: "test-client",
+        GITHUB_CLIENT_SECRET: "test-secret",
+        SESSION_SECRET: "test-session-secret",
+        GITHUB_ALLOWED_LOGINS: "allowed-user",
+        GITHUB_AUTH_HOSTS: "secondbrain.vamshisasi.com",
+        APP_SECRET_AUTH_HOSTS: "192.168.68.5,127.0.0.1,localhost",
+        AUTO_INDEX_ON_START: "false",
+        DATA_DIR: appDataPath,
+        INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    await waitForServer(`http://127.0.0.1:${port}/api/health`);
+
+    const publicConfigResponse = await fetch(`http://127.0.0.1:${port}/api/config/public`, {
+      headers: { Host: "secondbrain.vamshisasi.com" }
+    });
+    const publicConfig = await publicConfigResponse.json();
+    assert.equal(publicConfig.authMode, "github");
+    assert.equal(publicConfig.githubAvailable, true);
+
+    const lanConfigResponse = await fetch(`http://127.0.0.1:${port}/api/config/public`, {
+      headers: { Host: "192.168.68.5:3030" }
+    });
+    const lanConfig = await lanConfigResponse.json();
+    assert.equal(lanConfig.authMode, "passcode");
+    assert.equal(lanConfig.githubAvailable, false);
+    assert.equal(lanConfig.passcodeAvailable, true);
+
+    const publicTasksResponse = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
+      headers: { Host: "secondbrain.vamshisasi.com" }
+    });
+    const publicTasks = await publicTasksResponse.json();
+    assert.equal(publicTasksResponse.status, 401);
+    assert.equal(publicTasks.error, "Not authenticated.");
+
+    const lanTasksResponse = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
+      headers: { Host: "192.168.68.5:3030" }
+    });
+    const lanTasks = await lanTasksResponse.json();
+    assert.equal(lanTasksResponse.status, 401);
+    assert.equal(lanTasks.error, "App passcode required.");
+
+    const lanAuthedTasksResponse = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
+      headers: {
+        Host: "192.168.68.5:3030",
+        "X-Second-Brain-Secret": secret
+      }
+    });
+    const lanAuthedTasks = await lanAuthedTasksResponse.json();
+    assert.equal(lanAuthedTasksResponse.status, 200);
+    assert.deepEqual(lanAuthedTasks.tasks, []);
+  } finally {
+    if (server) server.kill("SIGTERM");
+    await rm(vaultPath, { recursive: true, force: true });
+    await rm(appDataPath, { recursive: true, force: true });
+  }
+});
+
 test("github oauth rejects non-allowlisted accounts without network calls", async () => {
   const vaultPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-vault-"));
   const appDataPath = await mkdtemp(path.join(os.tmpdir(), "second-brain-data-"));

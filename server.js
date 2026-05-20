@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const SERVER_STARTED_AT = new Date().toISOString();
 
 await loadDotEnv(path.join(__dirname, ".env"));
 
@@ -25,10 +26,15 @@ const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
 const SESSION_MAX_AGE = Math.max(300, Number(process.env.SESSION_MAX_AGE || "86400"));
 const GITHUB_ALLOWED_LOGINS = parseListEnv(process.env.GITHUB_ALLOWED_LOGINS);
+const GITHUB_AUTH_HOSTS = parseListEnv(process.env.GITHUB_AUTH_HOSTS);
+const APP_SECRET_AUTH_HOSTS = parseListEnv(process.env.APP_SECRET_AUTH_HOSTS);
 const GITHUB_CONFIG_PRESENT = Boolean(GITHUB_CLIENT_ID || GITHUB_CLIENT_SECRET || SESSION_SECRET || GITHUB_ALLOWED_LOGINS.length);
 const GITHUB_ENABLED = Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET && SESSION_SECRET && GITHUB_ALLOWED_LOGINS.length);
 const CHAT_PROVIDER = (process.env.CHAT_PROVIDER || "deepseek").toLowerCase();
 const OPENCODE_BASE_URL = (process.env.OPENCODE_BASE_URL || "http://127.0.0.1:4096").replace(/\/+$/, "");
+const OPENCODE_AUTO_START = process.env.OPENCODE_AUTO_START !== "false";
+const OPENCODE_HOST = process.env.OPENCODE_HOST || "127.0.0.1";
+const OPENCODE_PORT = Number(process.env.OPENCODE_PORT || "4096");
 const OPENCODE_SERVER_USERNAME = process.env.OPENCODE_SERVER_USERNAME || "opencode";
 const OPENCODE_SERVER_PASSWORD = process.env.OPENCODE_SERVER_PASSWORD || "";
 const OPENCODE_REGULAR_MODEL = process.env.OPENCODE_REGULAR_MODEL || process.env.OPENCODE_MODEL || "deepseek/deepseek-v4-flash";
@@ -112,7 +118,8 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    if (GITHUB_ENABLED && url.pathname === "/auth/login" && req.method === "GET") {
+    if (url.pathname === "/auth/login" && req.method === "GET") {
+      if (!isGitHubAuthRequest(req)) return sendJson(res, 404, { error: "GitHub login is not enabled for this host." });
       const state = generateOAuthState();
       const params = new URLSearchParams({
         client_id: GITHUB_CLIENT_ID,
@@ -125,7 +132,8 @@ const server = http.createServer(async (req, res) => {
       return res.end();
     }
 
-    if (GITHUB_ENABLED && url.pathname === "/auth/callback" && req.method === "GET") {
+    if (url.pathname === "/auth/callback" && req.method === "GET") {
+      if (!isGitHubAuthRequest(req)) return sendJson(res, 404, { error: "GitHub login is not enabled for this host." });
       const { code, state } = Object.fromEntries(url.searchParams);
       if (!code || !state) return sendJson(res, 400, { error: "Missing code or state." });
       if (!consumeOAuthState(state)) {
@@ -160,7 +168,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/config/public" && req.method === "GET") {
-      return sendJson(res, 200, await getPublicConfig());
+      return sendJson(res, 200, await getPublicConfig(req));
     }
 
     if (url.pathname === "/api/captures/recent" && req.method === "GET") {
@@ -374,19 +382,26 @@ const server = http.createServer(async (req, res) => {
 });
 
 function requireWriteAuth(req) {
+  const mode = getAuthMode(req);
   const session = getSession(req);
-  if (session) return;
-  if (!APP_SECRET) {
-    if (GITHUB_ENABLED) throw httpError(401, "Not authenticated.");
+  if (mode === "github") {
+    if (session) return;
+    throw httpError(401, "Not authenticated.");
+  }
+  if (mode === "passcode") {
+    if (!APP_SECRET) throw httpError(401, "App passcode is not configured.");
+    const header = req.headers["x-second-brain-secret"] || "";
+    const auth = req.headers.authorization || "";
+    const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7) : "";
+    const provided = String(header || bearer || "");
+    if (!timingSafeEqual(provided, APP_SECRET)) {
+      throw httpError(401, "App passcode required.");
+    }
     return;
   }
-  const header = req.headers["x-second-brain-secret"] || "";
-  const auth = req.headers.authorization || "";
-  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7) : "";
-  const provided = String(header || bearer || "");
-  if (!timingSafeEqual(provided, APP_SECRET)) {
-    throw httpError(401, "App passcode required.");
-  }
+  if (session) return;
+  if (APP_SECRET) throw httpError(401, "App passcode required.");
+  if (GITHUB_ENABLED) throw httpError(401, "Not authenticated.");
 }
 
 function timingSafeEqual(a, b) {
@@ -525,10 +540,23 @@ async function fetchGitHubUser(accessToken) {
 }
 
 async function getAuthUser(req) {
+  const mode = getAuthMode(req);
   const session = getSession(req);
+  if (mode === "github") {
+    if (!session) throw httpError(401, "Not authenticated.");
+    return {
+      authenticated: true,
+      method: "github",
+      id: session.userId,
+      name: session.userName,
+      login: session.userLogin,
+      avatar: session.userAvatar
+    };
+  }
+  if (mode === "passcode") {
+    throw httpError(401, "Passcode required.");
+  }
   if (!session) {
-    if (GITHUB_ENABLED) throw httpError(401, "Not authenticated.");
-    if (APP_SECRET) throw httpError(401, "Passcode required.");
     return { authenticated: false, method: "none" };
   }
   return {
@@ -604,16 +632,25 @@ async function getHealth() {
     security: {
       authRequired: Boolean(APP_SECRET) || GITHUB_ENABLED,
       githubAvailable: GITHUB_ENABLED,
+      githubAuthHosts: GITHUB_AUTH_HOSTS,
+      appSecretAuthHosts: APP_SECRET_AUTH_HOSTS,
       lanAccess: isLanBound(),
       warning: getLanWarning()
-    }
+    },
+    runtime: getRuntimeState()
   };
 }
 
-async function getPublicConfig() {
+async function getPublicConfig(req) {
   const ignoreRules = await getIndexIgnoreRulePreview();
-  const backups = await getBackupState();
-  const chatRuntime = await getChatRuntimeStatus();
+  const [backups, chatRuntime, index] = await Promise.all([
+    getBackupState(),
+    getChatRuntimeStatus(),
+    getIndexStatus()
+  ]);
+  const authMode = getAuthMode(req);
+  const githubAvailable = authMode === "github";
+  const passcodeAvailable = authMode === "passcode";
   return {
     appName: "Second Brain Capture",
     vaultName: path.basename(VAULT_PATH),
@@ -623,14 +660,41 @@ async function getPublicConfig() {
     localUrl: `http://127.0.0.1:${PORT}`,
     lanUrl: isLanBound() ? `http://<your-mac-ip>:${PORT}` : "",
     lanAccess: isLanBound(),
-    authRequired: Boolean(APP_SECRET) || GITHUB_ENABLED,
-    githubAvailable: GITHUB_ENABLED,
-    securityWarning: getLanWarning(),
+    authRequired: authMode !== "none",
+    authMode,
+    githubAvailable,
+    passcodeAvailable,
+    securityWarning: getLanWarning(req),
     currentMonth: getCurrentMonthSlug(),
     monthlyFile: getCurrentMonthlyCaptureFile(),
     targetFile: getCurrentMonthlyCaptureFile(),
     ignoreRules,
     backups,
+    operations: {
+      runtime: getRuntimeState(),
+      index: {
+        ready: index.ready,
+        noteCount: index.noteCount,
+        taskCount: index.taskCount,
+        openTaskCount: index.openTaskCount,
+        skippedCount: index.skippedCount,
+        durationMs: index.durationMs,
+        lastRunAt: index.lastRunAt,
+        watcher: index.watcher
+      },
+      service: {
+        label: "com.vamshi.second-brain-app",
+        opencodeLabel: "webapp managed",
+        opencodeAutoStart: OPENCODE_AUTO_START,
+        opencodeHost: OPENCODE_HOST,
+        opencodePort: OPENCODE_PORT,
+        opencodeCwd: VAULT_PATH,
+        installCommand: "npm run service:install",
+        statusCommand: "npm run service:status",
+        logsCommand: "npm run service:logs",
+        docs: "docs/mac-mini-service.md"
+      }
+    },
     chat: {
       enabled: isOpenCodeChatProvider() ? Boolean(OPENCODE_BASE_URL) : Boolean(DEEPSEEK_API_KEY),
       provider: getChatProvider(),
@@ -646,6 +710,55 @@ async function getPublicConfig() {
       runtime: chatRuntime
     },
     categories: Array.from(CAPTURE_CATEGORIES)
+  };
+}
+
+function getAuthMode(req) {
+  const host = getRequestHostname(req);
+  if (GITHUB_ENABLED && hostMatches(host, GITHUB_AUTH_HOSTS)) return "github";
+  if (APP_SECRET && hostMatches(host, APP_SECRET_AUTH_HOSTS)) return "passcode";
+  if (APP_SECRET && isLocalOrPrivateHost(host) && !hostMatches(host, GITHUB_AUTH_HOSTS)) return "passcode";
+  if (GITHUB_ENABLED) return "github";
+  if (APP_SECRET) return "passcode";
+  return "none";
+}
+
+function isGitHubAuthRequest(req) {
+  return getAuthMode(req) === "github";
+}
+
+function getRequestHostname(req) {
+  const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const host = forwardedHost || String(req.headers.host || "");
+  return host.replace(/^\[/, "").replace(/\]$/, "").split(":")[0].trim().toLowerCase();
+}
+
+function hostMatches(host, hosts) {
+  if (!host || !Array.isArray(hosts) || !hosts.length) return false;
+  return hosts.some((candidate) => candidate === host);
+}
+
+function isLocalOrPrivateHost(host) {
+  if (!host) return false;
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  const match = host.match(/^172\.(\d{1,2})\.\d{1,3}\.\d{1,3}$/);
+  return Boolean(match && Number(match[1]) >= 16 && Number(match[1]) <= 31);
+}
+
+function getRuntimeState() {
+  return {
+    startedAt: SERVER_STARTED_AT,
+    uptimeSeconds: Math.round(process.uptime()),
+    pid: process.pid,
+    nodeVersion: process.version,
+    nodeEnv: process.env.NODE_ENV || "development",
+    cwd: __dirname,
+    dataDir: DATA_DIR,
+    dbPath: DB_PATH,
+    autoIndexOnStart: AUTO_INDEX_ON_START,
+    watchDebounceMs: WATCH_DEBOUNCE_MS
   };
 }
 
@@ -682,8 +795,12 @@ function isLanBound() {
   return HOST === "0.0.0.0" || HOST === "::";
 }
 
-function getLanWarning() {
+function getLanWarning(req = null) {
   if (!isLanBound()) return "";
+  const mode = req ? getAuthMode(req) : "";
+  if (mode === "passcode") return "LAN access is enabled and write actions require the app passcode.";
+  if (mode === "github") return "LAN access is enabled and write actions require GitHub login.";
+  if (GITHUB_ENABLED && APP_SECRET) return "LAN access is enabled. Public hosts use GitHub login; local/private hosts use the app passcode.";
   if (GITHUB_ENABLED) return "LAN access is enabled and write actions require GitHub login.";
   if (APP_SECRET) return "LAN access is enabled and write actions require the app passcode.";
   return "LAN access is enabled without a passcode. Devices on your network can write to this vault.";

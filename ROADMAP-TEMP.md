@@ -193,15 +193,18 @@ Recommended order:
 
 ## Phase 6: Packaging / Maintenance
 
-Status: Not started.
+Status: In progress.
 
 Planned:
-- Mac mini launch setup.
-- Durable local startup instructions.
-- Backup hygiene and dirty-state visibility.
-- App repo and vault repo separation docs.
-- Maintenance checklist.
-- Rename / branding decision.
+- Mac mini launch setup. Done: added native `launchd` scripts and docs; install is manual via `npm run service:install`. The web app service now starts vault-native OpenCode HTTP alongside the app.
+- Durable local startup instructions. Done: README, `docs/mac-mini-service.md`, and `docs/operations-runbook.md`.
+- Operational safety/status visibility. Done: Dashboard Settings shows runtime, index watcher, chat runtime, service commands, git dirty state, vault path, and auth/LAN state.
+- Backup hygiene and dirty-state visibility. Done: Settings shows app/vault git state, `docs/maintenance-checklist.md` documents expected hygiene, and `npm run doctor` checks the local operating shape.
+- App repo and vault repo separation docs. Done: `docs/repo-and-backup-hygiene.md`.
+- Maintenance checklist. Done: `docs/maintenance-checklist.md` with weekly/monthly checks.
+- Rename / branding decision. Deferred per user request.
+- Docker build. Ignored/deferred per user request.
+- MCP server. Next candidate phase after docs; initial recommendation is local stdio MCP.
 
 Flowise rename:
 - Recommended timing: Phase 6, after AI workflows are stable.

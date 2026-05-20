@@ -7,7 +7,13 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check server.js && node --check public/app.js && npm test",
+    "doctor": "zsh scripts/doctor.sh",
+    "service:install": "zsh scripts/install-launchd.sh",
+    "service:uninstall": "zsh scripts/uninstall-launchd.sh",
+    "service:status": "zsh scripts/service-status.sh",
+    "service:logs": "zsh scripts/service-logs.sh"
   },
   "engines": {
     "node": ">=20"

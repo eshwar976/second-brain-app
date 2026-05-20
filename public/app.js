@@ -216,6 +216,7 @@ const editText = document.querySelector("#edit-text");
 const editConfirmButton = document.querySelector("#edit-confirm");
 const editCancelButtons = Array.from(document.querySelectorAll("[data-edit-cancel]"));
 const actionToast = document.querySelector("#action-toast");
+let appViewportHeight = 0;
 
 init();
 
@@ -735,13 +736,20 @@ function wireInteractions() {
 
 function initMobileViewport() {
   const updateViewport = () => {
-    const viewport = window.visualViewport;
-    const height = viewport?.height || window.innerHeight;
-    document.documentElement.style.setProperty("--app-height", `${Math.round(height)}px`);
+    const active = document.activeElement;
+    const inputFocused = active === textarea || active === chatText || active?.tagName === "TEXTAREA" || active?.tagName === "INPUT";
+    const height = window.innerHeight || document.documentElement.clientHeight;
+    if (!appViewportHeight || !inputFocused || height > appViewportHeight) {
+      appViewportHeight = height;
+    }
+    document.documentElement.style.setProperty("--app-height", `${Math.round(appViewportHeight)}px`);
   };
   updateViewport();
   window.addEventListener("resize", updateViewport, { passive: true });
-  window.addEventListener("orientationchange", updateViewport, { passive: true });
+  window.addEventListener("orientationchange", () => {
+    appViewportHeight = 0;
+    updateViewport();
+  }, { passive: true });
   window.visualViewport?.addEventListener("resize", () => {
     updateViewport();
     scheduleChatScrollToBottom();
@@ -2519,7 +2527,29 @@ function renderSettingsDetails(config) {
     runtime.detail,
     runtime.latencyMs ? `${runtime.latencyMs}ms` : ""
   ].filter(Boolean).join(" · ");
+  const operations = config.operations || {};
+  const appRuntime = operations.runtime || {};
+  const index = operations.index || {};
+  const watcherLabel = formatWatcherStatus(index.watcher);
+  const runtimeStarted = appRuntime.startedAt ? formatDateTime(appRuntime.startedAt) : "unknown";
+  const runtimeUptime = formatDurationSeconds(appRuntime.uptimeSeconds);
+  const indexLastRun = index.lastRunAt ? formatDateTime(index.lastRunAt) : "not indexed yet";
+  const service = operations.service || {};
   settingsDetails.innerHTML = `
+    <div class="settings-health-card">
+      <div>
+        <span>Runtime</span>
+        <strong>${escapeHtml(appRuntime.nodeEnv || "development")} · ${escapeHtml(runtimeUptime || "just started")}</strong>
+      </div>
+      <div>
+        <span>Index watcher</span>
+        <strong>${escapeHtml(watcherLabel)}</strong>
+      </div>
+      <div>
+        <span>Chat runtime</span>
+        <strong>${escapeHtml(runtimeLabel)}</strong>
+      </div>
+    </div>
     <div class="settings-grid">
       <div><span>Vault</span><strong>${escapeHtml(config.vaultName)}</strong></div>
       <div><span>Target file</span><strong>${escapeHtml(relativeMonthlyPath(config.targetFile || config.monthlyFile))}</strong></div>
@@ -2532,7 +2562,23 @@ function renderSettingsDetails(config) {
       <div><span>OpenCode URL</span><strong>${escapeHtml(config.chat?.opencodeBaseUrl || "not used")}</strong></div>
       <div><span>OpenCode agent</span><strong>${escapeHtml(config.chat?.agent || "not used")}</strong></div>
       <div><span>Runtime detail</span><strong>${escapeHtml(runtimeDetail || "not checked")}</strong></div>
+      <div><span>Started</span><strong>${escapeHtml(runtimeStarted)}</strong></div>
+      <div><span>Node</span><strong>${escapeHtml(appRuntime.nodeVersion || "unknown")}</strong></div>
+      <div><span>Process</span><strong>${escapeHtml(appRuntime.pid ? `pid ${appRuntime.pid}` : "unknown")}</strong></div>
+      <div><span>Data dir</span><strong>${escapeHtml(appRuntime.dataDir || "unknown")}</strong></div>
+      <div><span>Index last run</span><strong>${escapeHtml(indexLastRun)}</strong></div>
+      <div><span>Index size</span><strong>${numberFormat(index.noteCount)} notes · ${numberFormat(index.taskCount)} tasks</strong></div>
+      <div><span>Watcher debounce</span><strong>${numberFormat(appRuntime.watchDebounceMs)}ms</strong></div>
+      <div><span>Service</span><strong>${escapeHtml(service.label || "manual")}</strong></div>
+      <div><span>OpenCode service</span><strong>${escapeHtml(service.opencodeAutoStart ? (service.opencodeLabel || "enabled") : "manual")}</strong></div>
+      <div><span>OpenCode bind</span><strong>${escapeHtml(service.opencodeAutoStart ? `${service.opencodeHost || "127.0.0.1"}:${service.opencodePort || "4096"}` : "manual")}</strong></div>
+      <div><span>OpenCode cwd</span><strong>${escapeHtml(service.opencodeCwd || "vault path")}</strong></div>
     </div>
+    ${service.installCommand ? `
+      <p class="quiet-line settings-service-line">
+        Mac mini service: ${escapeHtml(service.installCommand)} · ${escapeHtml(service.statusCommand || "")} · ${escapeHtml(service.logsCommand || "")}
+      </p>
+    ` : ""}
     ${backupWarning ? `<p class="warning-line">Backup reminder: ${escapeHtml(backupWarning[0])} has ${escapeHtml(backupWarning[1].summary)}.</p>` : ""}
     ${backupGrid}
     ${ignoreList}
@@ -2541,7 +2587,7 @@ function renderSettingsDetails(config) {
         <button class="secondary-button" type="button" data-auth-open>Set/reset app passcode</button>
         <button class="secondary-button" type="button" data-auth-clear>Clear saved passcode</button>
       ` : ""}
-      <button class="secondary-button" type="button" data-chat-status-refresh>Refresh OpenCode status</button>
+      <button class="secondary-button" type="button" data-chat-status-refresh>Refresh status</button>
     </div>
   `;
   settingsDetails.querySelector("[data-auth-open]")?.addEventListener("click", openAuthSheet);
@@ -2561,7 +2607,7 @@ function renderSettingsDetails(config) {
   });
   settingsDetails.querySelector("[data-chat-status-refresh]")?.addEventListener("click", async () => {
     await loadConfig();
-    flashHelper("OpenCode status refreshed.");
+    flashHelper("Status refreshed.");
   });
   settingsDetails.querySelector("[data-auth-clear]")?.addEventListener("click", () => {
     state.authSecret = "";
@@ -4043,6 +4089,13 @@ function formatDurationMinutes(minutes) {
   const hours = Math.floor(total / 60);
   const remainder = Math.round(total % 60);
   return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+function formatDurationSeconds(seconds) {
+  const total = Number(seconds);
+  if (!Number.isFinite(total) || total <= 0) return "";
+  if (total < 60) return `${Math.round(total)}s`;
+  return formatDurationMinutes(total / 60);
 }
 
 async function resumeDeepWorkSession(sessionPath, goal) {

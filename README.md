@@ -27,6 +27,38 @@ Then open:
 http://127.0.0.1:3030
 ```
 
+## Mac Mini Service
+
+For always-on Mac mini use, install the native `launchd` service:
+
+```bash
+npm run service:install
+```
+
+This starts the web app and, by default, starts OpenCode HTTP from the configured vault path.
+
+Useful commands:
+
+```bash
+npm run service:status
+npm run service:logs
+npm run service:uninstall
+```
+
+Details are in [docs/mac-mini-service.md](docs/mac-mini-service.md).
+
+The full operator guide is [docs/operations-runbook.md](docs/operations-runbook.md).
+
+For routine checks and recovery steps, use [docs/maintenance-checklist.md](docs/maintenance-checklist.md).
+
+For repo/vault boundaries and backup hygiene, use [docs/repo-and-backup-hygiene.md](docs/repo-and-backup-hygiene.md).
+
+Quick local diagnosis:
+
+```bash
+npm run doctor
+```
+
 ## Configuration
 
 `.env` is intentionally ignored by Git.
@@ -52,7 +84,7 @@ CHAT_HISTORY_LIMIT=8
 CHAT_SESSIONS_DIR=3.Resources/gpt/sessions
 ```
 
-Set `APP_SECRET` when binding to `0.0.0.0`. When present, write actions require the passcode in the web app before they can append, edit, triage, toggle, or rebuild.
+Set `APP_SECRET` when binding to `0.0.0.0`. When present, local/private hosts can use the app passcode before they append, edit, triage, toggle, or rebuild.
 
 ## GitHub OAuth
 
@@ -77,7 +109,21 @@ SESSION_MAX_AGE=86400
 
 All four (`GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SESSION_SECRET`, `GITHUB_ALLOWED_LOGINS`) must be set to enable GitHub OAuth. `GITHUB_ALLOWED_LOGINS` is a comma-separated allowlist; only those GitHub accounts can open the vault app. When enabled, the app redirects unauthenticated browser users to GitHub's authorization page, then creates an HttpOnly session cookie on success.
 
-`APP_SECRET` still works as a fallback when GitHub is not configured, or for CLI/curl usage where a browser redirect is impractical.
+For dual auth, keep GitHub on the public hostname and app passcode on local/private hosts:
+
+```env
+HOST=0.0.0.0
+PORT=3030
+APP_SECRET=your_local_lan_passcode
+GITHUB_AUTH_HOSTS=secondbrain.vamshisasi.com
+APP_SECRET_AUTH_HOSTS=127.0.0.1,localhost,192.168.68.5
+```
+
+With both GitHub OAuth and `APP_SECRET` configured:
+
+- `https://secondbrain.vamshisasi.com` uses GitHub login.
+- `http://192.168.68.5:3030` uses the app passcode.
+- OpenCode should stay bound to `127.0.0.1:4096`.
 
 Set `DEEPSEEK_API_KEY` to enable Chat. Chat retrieves a small set of indexed vault snippets and sends those snippets, the current question, and short browser-session history to the DeepSeek API.
 
