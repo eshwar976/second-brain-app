@@ -82,6 +82,13 @@ APP_PORT="$PORT_VALUE"
 OPENCODE_BASE_URL="$(env_value OPENCODE_BASE_URL "http://127.0.0.1:4096")"
 OPENCODE_AUTO_START="$(env_value OPENCODE_AUTO_START "true")"
 OPENCODE_PORT="$(env_value OPENCODE_PORT "4096")"
+MCP_ENABLED_VALUE="$(env_value MCP_ENABLED "false")"
+MCP_HOST_VALUE="$(env_value MCP_HOST "127.0.0.1")"
+MCP_PORT_VALUE="$(env_value MCP_PORT "3031")"
+MCP_TOKEN_VALUE="$(env_value MCP_TOKEN "")"
+MCP_CLIENT_TOOL_ALLOWLISTS_VALUE="$(env_value MCP_CLIENT_TOOL_ALLOWLISTS "")"
+MCP_ALLOWED_ORIGINS_VALUE="$(env_value MCP_ALLOWED_ORIGINS "")"
+MCP_RATE_LIMIT_MAX_VALUE="$(env_value MCP_RATE_LIMIT_MAX "60")"
 GITHUB_AUTH_HOSTS="$(env_value GITHUB_AUTH_HOSTS "")"
 APP_SECRET_AUTH_HOSTS="$(env_value APP_SECRET_AUTH_HOSTS "")"
 APP_SECRET_VALUE="$(env_value APP_SECRET "")"
@@ -130,6 +137,31 @@ if [ -n "$APP_SECRET_AUTH_HOSTS" ]; then
   ok "App passcode hosts: $APP_SECRET_AUTH_HOSTS"
 else
   warn "APP_SECRET_AUTH_HOSTS is empty; local/private hosts default to passcode when APP_SECRET is configured"
+fi
+
+if [ "$MCP_ENABLED_VALUE" = "true" ]; then
+  ok "MCP enabled on $MCP_HOST_VALUE:$MCP_PORT_VALUE"
+  if [ -n "$MCP_TOKEN_VALUE" ]; then
+    ok "MCP token is configured"
+    if [ "$MCP_TOKEN_VALUE" = "$APP_SECRET_VALUE" ]; then
+      warn "MCP_TOKEN matches APP_SECRET; use a separate token when possible"
+    fi
+  else
+    fail "MCP is enabled without MCP_TOKEN"
+  fi
+  ok "MCP rate limit: $MCP_RATE_LIMIT_MAX_VALUE requests/window"
+  if [ -n "$MCP_CLIENT_TOOL_ALLOWLISTS_VALUE" ]; then
+    ok "MCP client scopes configured"
+  else
+    warn "MCP client scopes are not configured; all clients share MCP_ALLOWED_TOOLS"
+  fi
+  if [ -n "$MCP_ALLOWED_ORIGINS_VALUE" ]; then
+    ok "MCP allowed origins: $MCP_ALLOWED_ORIGINS_VALUE"
+  else
+    ok "MCP browser CORS origins disabled"
+  fi
+else
+  ok "MCP disabled"
 fi
 
 section "Repo Boundary"
@@ -184,6 +216,14 @@ elif lsof -nP -iTCP:"$OPENCODE_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   ok "OpenCode is listening on port $OPENCODE_PORT"
 else
   fail "OpenCode is not listening on port $OPENCODE_PORT"
+fi
+
+if [ "$MCP_ENABLED_VALUE" = "true" ]; then
+  if lsof -nP -iTCP:"$MCP_PORT_VALUE" -sTCP:LISTEN >/dev/null 2>&1; then
+    ok "MCP is listening on port $MCP_PORT_VALUE"
+  else
+    fail "MCP is not listening on port $MCP_PORT_VALUE"
+  fi
 fi
 
 section "Vault Native OpenCode"

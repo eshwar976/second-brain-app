@@ -55,6 +55,12 @@ For repo/vault boundaries and backup hygiene, use [docs/repo-and-backup-hygiene.
 
 For quarter-level habit tracking in Dashboard, use [docs/okr-habit-format.md](docs/okr-habit-format.md).
 
+For MCP client setup, use [docs/mcp-client-setup.md](docs/mcp-client-setup.md).
+
+For the future MCP architecture and security model, use [docs/mcp-future-plan.md](docs/mcp-future-plan.md).
+
+When `MCP_ENABLED=true`, the app also starts a token-protected MCP HTTP endpoint at `/mcp` on `MCP_PORT` for trusted internal-network clients.
+
 Quick local diagnosis:
 
 ```bash

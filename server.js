@@ -4,6 +4,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
+import { SECOND_BRAIN_CAPABILITIES } from "./src/capabilities/manifest.js";
+import {
+  createMcpHttpServer,
+  isLoopbackHost,
+  readMcpAuditEntries,
+  validateMcpConfig
+} from "./src/mcp/httpServer.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,6 +28,16 @@ const SQLITE_BIN = process.env.SQLITE_BIN || "/usr/bin/sqlite3";
 const WATCH_DEBOUNCE_MS = Number(process.env.WATCH_DEBOUNCE_MS || "1200");
 const AUTO_INDEX_ON_START = process.env.AUTO_INDEX_ON_START !== "false";
 const APP_SECRET = process.env.APP_SECRET || "";
+const MCP_ENABLED = process.env.MCP_ENABLED === "true";
+const MCP_HOST = process.env.MCP_HOST || "127.0.0.1";
+const MCP_PORT = Number(process.env.MCP_PORT || "3031");
+const MCP_TOKEN = process.env.MCP_TOKEN || "";
+const MCP_ALLOWED_TOOLS = parseListEnv(process.env.MCP_ALLOWED_TOOLS);
+const MCP_CLIENT_TOOL_ALLOWLISTS = parseMcpClientToolAllowlists(process.env.MCP_CLIENT_TOOL_ALLOWLISTS);
+const MCP_AUDIT_LOG = process.env.MCP_AUDIT_LOG ? path.resolve(__dirname, process.env.MCP_AUDIT_LOG) : path.join(DATA_DIR, "mcp-audit.jsonl");
+const MCP_ALLOWED_ORIGINS = parseListEnv(process.env.MCP_ALLOWED_ORIGINS);
+const MCP_RATE_LIMIT_WINDOW_MS = Number(process.env.MCP_RATE_LIMIT_WINDOW_MS || "60000");
+const MCP_RATE_LIMIT_MAX = Number(process.env.MCP_RATE_LIMIT_MAX || "60");
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || "";
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || "";
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
@@ -72,6 +89,17 @@ const SKIPPED_DIRS = new Set([".obsidian", ".git", ".trash", ".agents", "node_mo
 const SKILL_ROOT = ".agents/skills";
 const SKIPPED_PATH_PARTS = new Set(["attachments", "credentials"]);
 const SENSITIVE_PATH_PATTERN = /(?:password|passwd|secret|token|credential|api[-_ ]?key|private[-_ ]?key)/i;
+const CAPABILITY_DEFINITIONS = new Map(SECOND_BRAIN_CAPABILITIES.map((capability) => [capability.name, capability]));
+const DEFAULT_MCP_ALLOWED_TOOLS = [
+  "capture.append",
+  "capture.recent",
+  "tasks.create",
+  "tasks.list",
+  "sprint.current",
+  "sprint.set_daily_focus",
+  "dashboard.summary"
+];
+const MCP_ALLOWED_TOOL_SET = new Set(MCP_ALLOWED_TOOLS.length ? MCP_ALLOWED_TOOLS : DEFAULT_MCP_ALLOWED_TOOLS);
 
 if (!VAULT_PATH) {
   console.error("Missing VAULT_PATH. Create .env from .env.example and set your Obsidian vault path.");
@@ -80,6 +108,13 @@ if (!VAULT_PATH) {
 
 if (GITHUB_CONFIG_PRESENT && !GITHUB_ENABLED) {
   console.error("GitHub OAuth requires GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, SESSION_SECRET, and GITHUB_ALLOWED_LOGINS.");
+  process.exit(1);
+}
+
+try {
+  validateMcpConfig({ enabled: MCP_ENABLED, host: MCP_HOST, token: MCP_TOKEN, appSecret: APP_SECRET });
+} catch (error) {
+  console.error(error.message);
   process.exit(1);
 }
 
@@ -174,15 +209,13 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/captures/recent" && req.method === "GET") {
       requireWriteAuth(req);
       const limit = Math.min(Number(url.searchParams.get("limit") || "12"), 50);
-      const captures = await readRecentCaptures(limit);
-      return sendJson(res, 200, { captures, monthlyFile: getCurrentMonthlyCaptureFile() });
+      return sendJson(res, 200, await executeCapability("capture.recent", { limit }));
     }
 
     if (url.pathname === "/api/captures" && req.method === "POST") {
       requireWriteAuth(req);
       const body = await readRequestJson(req);
-      const capture = await appendCapture(body);
-      return sendJson(res, 201, { capture, monthlyFile: getCurrentMonthlyCaptureFile() });
+      return sendJson(res, 201, await executeCapability("capture.append", body));
     }
 
     if (url.pathname === "/api/captures/update" && req.method === "POST") {
@@ -212,14 +245,20 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, await updateEditableIndexIgnoreRules(body));
     }
 
+    if (url.pathname === "/api/mcp/audit" && req.method === "GET") {
+      requireWriteAuth(req);
+      const limit = Math.min(Number(url.searchParams.get("limit") || "12"), 50);
+      return sendJson(res, 200, await getMcpAuditStatus(limit));
+    }
+
     if (url.pathname === "/api/dashboard" && req.method === "GET") {
       requireWriteAuth(req);
-      return sendJson(res, 200, await getDashboard());
+      return sendJson(res, 200, await executeCapability("dashboard.summary"));
     }
 
     if (url.pathname === "/api/personal-sprint" && req.method === "GET") {
       requireWriteAuth(req);
-      return sendJson(res, 200, await getPersonalSprint(url.searchParams.get("view") || ""));
+      return sendJson(res, 200, await executeCapability("sprint.current", { view: url.searchParams.get("view") || "" }));
     }
 
     if (url.pathname === "/api/personal-sprint/checkbox" && req.method === "POST") {
@@ -231,20 +270,20 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/api/personal-sprint/daily-focus" && req.method === "POST") {
       requireWriteAuth(req);
       const body = await readRequestJson(req);
-      return sendJson(res, 200, await updatePersonalSprintDailyFocus(body));
+      return sendJson(res, 200, await executeCapability("sprint.set_daily_focus", body));
     }
 
     if (url.pathname === "/api/notes/search" && req.method === "GET") {
       requireWriteAuth(req);
       const query = url.searchParams.get("q") || "";
       const limit = Math.min(Number(url.searchParams.get("limit") || "20"), 50);
-      return sendJson(res, 200, await searchNotes(query, limit));
+      return sendJson(res, 200, await executeCapability("vault.search", { query, limit }));
     }
 
     if (url.pathname === "/api/chat" && req.method === "POST") {
       requireWriteAuth(req);
       const body = await readRequestJson(req);
-      return sendJson(res, 200, await answerChat(body));
+      return sendJson(res, 200, await executeCapability("chat.send_message", body));
     }
 
     if (url.pathname === "/api/chat/capture-summary" && req.method === "POST") {
@@ -355,13 +394,13 @@ const server = http.createServer(async (req, res) => {
       const source = url.searchParams.get("source") || "all";
       const focus = url.searchParams.get("focus") || "all";
       const limit = Math.min(Number(url.searchParams.get("limit") || "100"), 200);
-      return sendJson(res, 200, await getTasks({ status, scope, source, focus, limit }));
+      return sendJson(res, 200, await executeCapability("tasks.list", { status, scope, source, focus, limit }));
     }
 
     if (url.pathname === "/api/tasks/toggle" && req.method === "POST") {
       requireWriteAuth(req);
       const body = await readRequestJson(req);
-      return sendJson(res, 200, await toggleTask(body));
+      return sendJson(res, 200, await executeCapability("tasks.complete", body));
     }
 
     if (url.pathname === "/api/tasks/triage" && req.method === "POST") {
@@ -387,6 +426,24 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+const mcpServer = createMcpHttpServer({
+  enabled: MCP_ENABLED,
+  host: MCP_HOST,
+  port: MCP_PORT,
+  token: MCP_TOKEN,
+  appSecret: APP_SECRET,
+  allowedToolSet: MCP_ALLOWED_TOOL_SET,
+  clientToolAllowlists: MCP_CLIENT_TOOL_ALLOWLISTS,
+  capabilities: SECOND_BRAIN_CAPABILITIES,
+  capabilityDefinitions: CAPABILITY_DEFINITIONS,
+  executeCapability,
+  auditLog: MCP_AUDIT_LOG,
+  allowedOrigins: MCP_ALLOWED_ORIGINS,
+  rateLimitWindowMs: MCP_RATE_LIMIT_WINDOW_MS,
+  rateLimitMax: MCP_RATE_LIMIT_MAX,
+  toVaultPath
+});
+
 function requireWriteAuth(req) {
   const mode = getAuthMode(req);
   const session = getSession(req);
@@ -410,6 +467,57 @@ function requireWriteAuth(req) {
   if (GITHUB_ENABLED) throw httpError(401, "Not authenticated.");
 }
 
+async function executeCapability(name, input = {}) {
+  if (!CAPABILITY_DEFINITIONS.has(name)) throw httpError(404, `Unknown capability: ${name}`);
+
+  switch (name) {
+    case "capture.append": {
+      const capture = await appendCapture(input);
+      return { capture, monthlyFile: getCurrentMonthlyCaptureFile() };
+    }
+    case "capture.recent": {
+      const limit = clampNumber(input?.limit, 12, 1, 50);
+      const captures = await readRecentCaptures(limit);
+      return { captures, monthlyFile: getCurrentMonthlyCaptureFile() };
+    }
+    case "tasks.create": {
+      const capture = await appendCapture({ ...input, category: "todo" });
+      return { capture, monthlyFile: getCurrentMonthlyCaptureFile() };
+    }
+    case "tasks.list":
+      return getTasks({
+        status: input?.status || "open",
+        scope: input?.scope || "all",
+        source: input?.source || "all",
+        focus: input?.focus || "all",
+        limit: clampNumber(input?.limit, 100, 1, 200)
+      });
+    case "tasks.complete":
+      return toggleTask({
+        ...input,
+        status: typeof input?.done === "boolean" ? (input.done ? "done" : "open") : input?.status
+      });
+    case "sprint.current":
+      return getPersonalSprint(input?.view || "");
+    case "sprint.set_daily_focus":
+      return updatePersonalSprintDailyFocus(input);
+    case "dashboard.summary":
+      return getDashboard();
+    case "vault.search":
+      return searchNotes(input?.query || input?.q || "", clampNumber(input?.limit, 20, 1, 50));
+    case "chat.send_message":
+      return answerChat(input);
+    default:
+      throw httpError(501, `Capability is not implemented yet: ${name}`);
+  }
+}
+
+function clampNumber(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
+}
+
 function timingSafeEqual(a, b) {
   const left = Buffer.from(String(a));
   const right = Buffer.from(String(b));
@@ -422,6 +530,21 @@ function parseListEnv(value) {
     .split(",")
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
+}
+
+function parseMcpClientToolAllowlists(value) {
+  const scopes = new Map();
+  for (const rawScope of String(value || "").split(";")) {
+    const [rawClient, rawTools] = rawScope.split(":");
+    const client = String(rawClient || "").trim().toLowerCase();
+    if (!client) continue;
+    const tools = String(rawTools || "")
+      .split("|")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean);
+    if (tools.length) scopes.set(client, new Set(tools));
+  }
+  return scopes;
 }
 
 function isAllowedGitHubLogin(login) {
@@ -594,6 +717,12 @@ server.listen(PORT, HOST, () => {
   }
 });
 
+if (mcpServer) {
+  mcpServer.listen(MCP_PORT, MCP_HOST, () => {
+    console.log(`Second Brain MCP running at http://${MCP_HOST}:${MCP_PORT}/mcp`);
+  });
+}
+
 async function loadDotEnv(envPath) {
   try {
     const file = await fs.readFile(envPath, "utf8");
@@ -678,6 +807,7 @@ async function getPublicConfig(req) {
     backups,
     operations: {
       runtime: getRuntimeState(),
+      mcp: getMcpRuntimeState(),
       index: {
         ready: index.ready,
         noteCount: index.noteCount,
@@ -717,6 +847,35 @@ async function getPublicConfig(req) {
     },
     categories: Array.from(CAPTURE_CATEGORIES)
   };
+}
+
+async function getMcpAuditStatus(limit = 12) {
+  return {
+    ...getMcpRuntimeState(),
+    entries: await readMcpAuditEntries(MCP_AUDIT_LOG, limit)
+  };
+}
+
+function getMcpRuntimeState() {
+  return {
+    enabled: MCP_ENABLED,
+    host: MCP_HOST,
+    port: MCP_PORT,
+    url: MCP_ENABLED ? `http://${isLanBoundHost(MCP_HOST) ? "<your-mac-ip>" : MCP_HOST}:${MCP_PORT}/mcp` : "",
+    auth: MCP_TOKEN ? "MCP_TOKEN" : (MCP_ENABLED && isLoopbackHost(MCP_HOST) && APP_SECRET ? "APP_SECRET fallback" : "not configured"),
+    allowedTools: Array.from(MCP_ALLOWED_TOOL_SET),
+    clientScopes: Array.from(MCP_CLIENT_TOOL_ALLOWLISTS.entries()).map(([client, tools]) => ({ client, tools: Array.from(tools) })),
+    allowedOrigins: MCP_ALLOWED_ORIGINS,
+    rateLimit: {
+      windowMs: MCP_RATE_LIMIT_WINDOW_MS,
+      max: MCP_RATE_LIMIT_MAX
+    },
+    auditLog: MCP_AUDIT_LOG
+  };
+}
+
+function isLanBoundHost(host) {
+  return ["0.0.0.0", "::"].includes(String(host || "").trim());
 }
 
 function getAuthMode(req) {

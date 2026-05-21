@@ -37,6 +37,7 @@ test("todo capture, edit, and triage preserve Obsidian-friendly Markdown", async
         SESSION_SECRET: "",
         GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
       },
@@ -150,6 +151,7 @@ test("recent capture display hides inline metadata fields", async () => {
         SESSION_SECRET: "",
         GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
       },
@@ -235,6 +237,7 @@ test("chat context suggestions prioritize intent-matched vault files over generi
         SESSION_SECRET: "",
         GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
       },
@@ -296,6 +299,7 @@ test("dashboard reads personal checklist cadence state", async () => {
         SESSION_SECRET: "",
         GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
       },
@@ -468,6 +472,7 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
         SESSION_SECRET: "",
         GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore"),
         PERSONAL_OKR_ROOT: "2.Areas/Personal/OKRs",
@@ -616,6 +621,7 @@ test("deep work creates separate session files and captures ending recap", async
         SESSION_SECRET: "",
         GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore"),
         CHAT_SESSIONS_DIR: "3.Resources/gpt/sessions",
@@ -691,6 +697,7 @@ test("monthly fleeting review creates a separate draft without changing the raw 
         SESSION_SECRET: "",
         GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore"),
         CHAT_PROVIDER: "deepseek",
@@ -749,6 +756,7 @@ test("protected endpoints reject unauthenticated requests", async () => {
         SESSION_SECRET: "",
         GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
       },
@@ -791,6 +799,7 @@ test("auth mode can use GitHub for public host and passcode for LAN host", async
         GITHUB_AUTH_HOSTS: "secondbrain.vamshisasi.com",
         APP_SECRET_AUTH_HOSTS: "192.168.68.5,127.0.0.1,localhost",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
       },
@@ -871,6 +880,7 @@ test("github oauth rejects non-allowlisted accounts without network calls", asyn
           avatar_url: "https://example.invalid/avatar.png"
         }),
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
       },
@@ -917,6 +927,7 @@ test("github oauth config fails startup without an allowlist", async () => {
         SESSION_SECRET: "test-session-secret",
         GITHUB_ALLOWED_LOGINS: "",
         AUTO_INDEX_ON_START: "false",
+        MCP_ENABLED: "false",
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore")
       },

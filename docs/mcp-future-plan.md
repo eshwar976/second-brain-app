@@ -1,10 +1,30 @@
-# Future MCP Server Plan
+# MCP Server Plan
 
-This is a deferred feature plan for exposing the Second Brain app as an MCP server later. It is intentionally not an implementation task yet. The current app should stay focused on capture, tasks, sprint/OKR tracking, OpenCode chat, and Mac mini reliability.
+The app now includes a small MCP-compatible HTTP endpoint for trusted LAN/internal clients. The current implementation is intentionally narrow: it exposes operational tools for capture, tasks, sprint, and dashboard, while keeping broad vault access and chat deferred.
 
-## Why Defer
+## Current Status
 
-MCP would be a large capability boundary: it could expose vault reads, vault writes, chat, task actions, and future assistant integrations to other clients. That is useful, but it also increases the security surface. The safer path is to keep the current app stable, document the architecture now, and build MCP only when there is a concrete consumer.
+Implemented:
+
+- Streamable-HTTP-style JSON-RPC endpoint at `/mcp`.
+- Separate listener controlled by `MCP_ENABLED`, `MCP_HOST`, and `MCP_PORT`.
+- Token auth via `Authorization: Bearer <MCP_TOKEN>`.
+- Local compatibility with the existing app token when bound to loopback.
+- Tool allowlist via `MCP_ALLOWED_TOOLS`.
+- CORS origin allowlist via `MCP_ALLOWED_ORIGINS`; browser origins are denied unless explicitly allowed.
+- Per-IP/token rate limiting via `MCP_RATE_LIMIT_WINDOW_MS` and `MCP_RATE_LIMIT_MAX`.
+- JSONL audit log via `MCP_AUDIT_LOG`.
+- MCP client name capture via `X-MCP-Client`, `X-Client-Name`, or `_meta.clientName`.
+- Optional client-specific tool scopes via `MCP_CLIENT_TOOL_ALLOWLISTS`.
+- MCP audit status in webapp Settings through `/api/mcp/audit`.
+- LAN/client setup guide in `docs/mcp-client-setup.md`.
+- First-pass tools only by default.
+
+Still deferred:
+
+- Chat tools.
+- Arbitrary vault note read/write.
+- Public internet access.
 
 ## Future Goal
 
@@ -32,7 +52,7 @@ The smart speaker should not talk directly to the vault. It should talk to an au
 
 ### 1. Local stdio MCP
 
-Best first implementation.
+Optional future implementation.
 
 - Runs on the Mac mini beside the webapp.
 - Used by local developer tools or local assistant runtimes.
@@ -42,9 +62,9 @@ Best first implementation.
 
 ### 2. Network MCP
 
-Useful later for voice assistants, Home Assistant integrations, or remote clients.
+Current implementation target for internal LAN clients.
 
-- Runs over authenticated HTTP.
+- Runs over authenticated HTTP on `/mcp`.
 - Should live behind HTTPS.
 - Should require explicit auth separate from the public web UI session.
 - Should expose only allowlisted tools.
@@ -59,73 +79,89 @@ Not part of the first MCP pass.
 - Applies cross-service safety policies.
 - Owns voice-session state and wake-word/client concerns.
 
-## Proposed Implementation Order
+## Implementation Order
+
+Done:
 
 1. Write internal service boundaries inside the existing app.
    - Extract reusable operations for capture, tasks, sprint, dashboard, chat action workflows, and vault path safety.
    - Keep HTTP routes as callers of those services.
+   - Current prework lives in `src/capabilities/manifest.js`, which defines the future tool contract without enabling MCP.
+   - Current HTTP routes for capture, task listing/completion, sprint, dashboard, vault search, and chat now call an internal `executeCapability(name, input)` boundary after authenticating.
 
-2. Add local stdio MCP.
+2. Add LAN-capable HTTP MCP.
    - Tool-only server.
-   - No network listener.
-   - Read-only tools first.
-   - Then narrow write tools that reuse existing Markdown formats.
+   - Separate port.
+   - Token auth required for LAN binding.
+   - Narrow first-pass write tools that reuse existing Markdown formats.
 
 3. Add audit logging.
    - Log tool name, timestamp, caller identity if available, affected note path, and whether the operation wrote to the vault.
    - Never log secrets or full sensitive note bodies.
+   - Audit status is visible in Dashboard settings.
 
-4. Add optional network MCP.
-   - Require HTTPS and explicit auth.
-   - Add rate limits.
-   - Add tool allowlists by client.
+Still left:
+
+4. Harden network MCP.
+   - Done for first pass: optional client-specific tool allowlists.
    - Keep LAN and public-domain auth modes separate, similar to the webapp.
+   - Keep public internet MCP unsupported unless a reverse proxy/auth layer is deliberately added.
 
 5. Build assistant gateway only when a real voice/smart-speaker client exists.
 
 ## Candidate MCP Tools
 
-Read tools:
+Default first-pass tools:
 
-- `vault.search`
-- `vault.read_note`
 - `capture.recent`
 - `tasks.list`
 - `sprint.current`
 - `dashboard.summary`
-- `deepwork.history`
-
-Write tools:
-
 - `capture.append`
 - `tasks.create`
+- `sprint.set_daily_focus`
+
+Available in the manifest but intentionally not default-enabled:
+
 - `tasks.complete`
 - `tasks.update_metadata`
 - `sprint.update_weekly_checkbox`
 - `deepwork.start`
 - `deepwork.end`
+- `deepwork.history`
+- `vault.search`
+- `vault.read_note`, restricted and audited
 
-Chat/workflow tools:
+Deferred chat/workflow tools:
 
 - `chat.start_session`
 - `chat.send_message`
 - `chat.summarize_session`
 - `chat.extract_todos`
 - `chat.create_note_draft`
+- monthly/weekly review workflow tools
+- about-me/changelog workflow triggers via vault skills
 
-The first version should prefer read tools plus `capture.append` and `tasks.create`. Anything that mutates existing notes should wait until the audit and safety model is proven.
+Anything that mutates existing notes beyond daily focus should wait until the audit and safety model is proven.
 
 ## Security Considerations
 
 - Markdown remains the source of truth.
 - SQLite remains an operational index, not an authority for writes.
+- MCP starts disabled in `.env.example`.
+- MCP can bind to `0.0.0.0` for LAN use only when `MCP_TOKEN` is set.
+- Local MCP can use the existing app-token model.
+- If `MCP_TOKEN` is set, use it.
+- If `MCP_TOKEN` is not set, local-only development may fall back to `APP_SECRET`.
+- If MCP binds to a LAN/public interface, startup fails without explicit `MCP_TOKEN`.
+- GitHub OAuth is browser auth only; do not use it as MCP client auth.
 - Every path must be resolved inside `VAULT_PATH`; reject path traversal.
 - Do not expose arbitrary file reads.
 - Do not expose arbitrary file writes.
 - Do not expose shell execution.
 - Do not expose raw OpenCode control unless the caller is trusted.
 - Require authentication for all network MCP calls.
-- Use a separate MCP token/client credential from GitHub web login.
+- Prefer `Authorization: Bearer <MCP_TOKEN>` for MCP clients, while allowing the current `X-Second-Brain-Secret` app-token header for local compatibility.
 - Support client-specific allowlists, for example:
   - smart speaker: capture, task creation, dashboard summary
   - desktop assistant: vault search/read, chat session tools
@@ -133,6 +169,8 @@ The first version should prefer read tools plus `capture.append` and `tasks.crea
 - Prefer confirmation for destructive or broad changes.
 - Add audit logs before enabling write tools.
 - Keep secrets out of tool responses.
+- Add confirmation rules before enabling existing-note edits from network clients.
+- Add separate tokens per client before connecting Home Assistant or a voice gateway.
 
 ## Smart Speaker Considerations
 
@@ -169,11 +207,37 @@ Possible future modes:
 - Home Assistant integration.
 - Finance app integration.
 
+## Future Architecture Refactor
+
+Current code has an MCP transport module at `src/mcp/httpServer.js`, capability metadata in `src/capabilities/manifest.js`, and the trusted execution boundary in `server.js`.
+
+Future cleanup should split the trusted operation implementations into service modules:
+
+- `src/services/captureService.js`
+- `src/services/taskService.js`
+- `src/services/sprintService.js`
+- `src/services/dashboardService.js`
+- `src/services/vaultSearchService.js`
+- `src/services/chatService.js`
+- `src/services/auditService.js`
+
+The target shape remains:
+
+```text
+HTTP routes
+        \
+         executeCapability -> service modules -> vault/sqlite/opencode
+        /
+MCP tools
+```
+
+Keep transport/auth at the edges. Keep service modules trusted and transport-agnostic.
+
 ## Open Questions
 
 - Which MCP clients will be used first?
 - Should network MCP be LAN-only or public-domain accessible?
-- Should MCP share the existing `APP_SECRET`, or use a dedicated `MCP_SECRET`?
+- Should the first implementation accept only `Authorization: Bearer <MCP_TOKEN>`, or also accept `X-Second-Brain-Secret` for local compatibility?
 - Which write tools need confirmation?
 - Where should audit logs live: `.data/audit`, a SQLite table, or both?
 - Should chat tools use OpenCode sessions directly or the webapp's `/api/chat` wrapper?

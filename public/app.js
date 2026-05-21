@@ -40,6 +40,7 @@ const state = {
   category: "thought",
   captures: [],
   indexStatus: null,
+  mcpAudit: null,
   tasks: [],
   tasksTotal: 0,
   taskStatus: "open",
@@ -1228,6 +1229,14 @@ async function loadConfig() {
     if (helperLine) helperLine.textContent = "";
     renderChatThinkingState();
     renderSettingsDetails(config);
+    if (config.operations?.mcp?.enabled) {
+      try {
+        state.mcpAudit = await getJson("/api/mcp/audit?limit=12");
+        renderSettingsDetails(config);
+      } catch {
+        state.mcpAudit = null;
+      }
+    }
   } catch (error) {
     if (helperLine) helperLine.textContent = error.message;
   }
@@ -2536,6 +2545,7 @@ function renderSettingsDetails(config) {
   ].filter(Boolean).join(" · ");
   const operations = config.operations || {};
   const appRuntime = operations.runtime || {};
+  const mcp = operations.mcp || {};
   const index = operations.index || {};
   const watcherLabel = formatWatcherStatus(index.watcher);
   const runtimeStarted = appRuntime.startedAt ? formatDateTime(appRuntime.startedAt) : "unknown";
@@ -2580,6 +2590,11 @@ function renderSettingsDetails(config) {
       <div><span>OpenCode service</span><strong>${escapeHtml(service.opencodeAutoStart ? (service.opencodeLabel || "enabled") : "manual")}</strong></div>
       <div><span>OpenCode bind</span><strong>${escapeHtml(service.opencodeAutoStart ? `${service.opencodeHost || "127.0.0.1"}:${service.opencodePort || "4096"}` : "manual")}</strong></div>
       <div><span>OpenCode cwd</span><strong>${escapeHtml(service.opencodeCwd || "vault path")}</strong></div>
+      <div class="${mcp.enabled ? "is-ok" : ""}"><span>MCP</span><strong>${escapeHtml(mcp.enabled ? `${mcp.host}:${mcp.port}` : "disabled")}</strong></div>
+      <div><span>MCP tools</span><strong>${numberFormat((mcp.allowedTools || []).length)}</strong></div>
+      <div><span>MCP client scopes</span><strong>${numberFormat((mcp.clientScopes || []).length)}</strong></div>
+      <div><span>MCP rate limit</span><strong>${escapeHtml(mcp.enabled ? `${mcp.rateLimit?.max || 0}/${Math.round((mcp.rateLimit?.windowMs || 60000) / 1000)}s` : "disabled")}</strong></div>
+      <div><span>MCP audit</span><strong>${escapeHtml(mcp.enabled ? "enabled" : "disabled")}</strong></div>
     </div>
     ${service.installCommand ? `
       <p class="quiet-line settings-service-line">
@@ -2588,6 +2603,7 @@ function renderSettingsDetails(config) {
     ` : ""}
     ${backupWarning ? `<p class="warning-line">Backup reminder: ${escapeHtml(backupWarning[0])} has ${escapeHtml(backupWarning[1].summary)}.</p>` : ""}
     ${backupGrid}
+    ${renderMcpSettingsPanel(mcp)}
     ${ignoreList}
     <div class="settings-actions">
       ${config.authRequired && !config.githubAvailable ? `
@@ -2595,6 +2611,7 @@ function renderSettingsDetails(config) {
         <button class="secondary-button" type="button" data-auth-clear>Clear saved passcode</button>
       ` : ""}
       <button class="secondary-button" type="button" data-chat-status-refresh>Refresh status</button>
+      ${mcp.enabled ? `<button class="secondary-button" type="button" data-mcp-audit-refresh>Refresh MCP audit</button>` : ""}
     </div>
   `;
   settingsDetails.querySelector("[data-auth-open]")?.addEventListener("click", openAuthSheet);
@@ -2616,6 +2633,10 @@ function renderSettingsDetails(config) {
     await loadConfig();
     flashHelper("Status refreshed.");
   });
+  settingsDetails.querySelector("[data-mcp-audit-refresh]")?.addEventListener("click", async () => {
+    await loadMcpAudit();
+    flashHelper("MCP audit refreshed.");
+  });
   settingsDetails.querySelector("[data-auth-clear]")?.addEventListener("click", () => {
     state.authSecret = "";
     try {
@@ -2625,6 +2646,54 @@ function renderSettingsDetails(config) {
     }
     flashHelper("Saved passcode cleared from this browser.");
   });
+}
+
+function renderMcpSettingsPanel(mcp = {}) {
+  if (!mcp.enabled) return "";
+  const entries = state.mcpAudit?.entries || [];
+  const scopes = mcp.clientScopes || [];
+  return `
+    <details class="settings-ignore settings-mcp" open>
+      <summary>MCP audit <span>${numberFormat(entries.length)}</span></summary>
+      ${scopes.length ? `
+        <div class="mcp-client-scopes">
+          ${scopes.map((scope) => `
+            <div>
+              <strong>${escapeHtml(scope.client)}</strong>
+              <span>${escapeHtml((scope.tools || []).join(", "))}</span>
+            </div>
+          `).join("")}
+        </div>
+      ` : ""}
+      <div class="mcp-audit-list">
+        ${entries.length ? entries.map(renderMcpAuditEntry).join("") : `<p class="quiet-line">No MCP calls logged yet.</p>`}
+      </div>
+    </details>
+  `;
+}
+
+function renderMcpAuditEntry(entry = {}) {
+  const label = [entry.tool || "unknown", entry.client ? `via ${entry.client}` : ""].filter(Boolean).join(" ");
+  const detail = [
+    entry.time ? formatDateTime(entry.time) : "",
+    entry.remote || "",
+    entry.wrote ? "write" : "read",
+    entry.ok ? "ok" : "failed"
+  ].filter(Boolean).join(" · ");
+  return `
+    <div class="mcp-audit-entry ${entry.ok ? "is-ok" : "is-warning"}">
+      <strong>${escapeHtml(label)}</strong>
+      <span>${escapeHtml(detail)}</span>
+      ${entry.path ? `<code>${escapeHtml(entry.path)}</code>` : ""}
+      ${entry.error ? `<p>${escapeHtml(entry.error)}</p>` : ""}
+    </div>
+  `;
+}
+
+async function loadMcpAudit() {
+  if (!state.config?.operations?.mcp?.enabled) return;
+  state.mcpAudit = await getJson("/api/mcp/audit?limit=12");
+  renderSettingsDetails(state.config);
 }
 
 async function loadCaptures() {

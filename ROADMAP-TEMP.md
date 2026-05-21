@@ -2,13 +2,13 @@
 
 This file tracks the current phase status for the Second Brain webapp. It is temporary and can later become a permanent `ROADMAP.md` or README section.
 
-Last updated: 2026-05-14
+Last updated: 2026-05-21
 
 ## Current Priority Order
 
-1. Phase 5: AI Workflows
-2. Phase 6: Packaging / Maintenance
-3. Future MCP server plan
+1. Phase 6: Packaging / Maintenance and MCP hardening
+2. Phase 5: AI Workflows polish
+3. Future MCP tools/security planning
 4. Optional polish from earlier phases
 5. Rename / branding pass, including possible rename to Flowise
 
@@ -205,28 +205,56 @@ Planned:
 - Maintenance checklist. Done: `docs/maintenance-checklist.md` with weekly/monthly checks.
 - Rename / branding decision. Deferred per user request.
 - Docker build. Ignored/deferred per user request.
-- MCP server. Deferred as a future feature enhancement; architecture and security plan captured in `docs/mcp-future-plan.md`.
+- MCP server. Done for a narrow LAN/internal first pass; future architecture, tools, and security plan captured in `docs/mcp-future-plan.md`.
 
 ## Future Feature Enhancement: MCP Server
 
-Status: Planned, not started.
+Status: First LAN/internal pass implemented; future expansion deferred until there is a concrete client.
 
-Plan:
-- Keep MCP deferred until there is a concrete client such as a local assistant, smart speaker, or Home Assistant workflow.
-- Start with a local stdio MCP server before any network MCP exposure.
-- Treat network MCP as a later, explicitly secured layer for assistant/smart-speaker use.
+Done now:
+- LAN-capable MCP HTTP endpoint on a separate port.
+- Token auth with startup protection for LAN binding.
+- Tool allowlist with narrow first-pass operations.
+- Shared capability boundary between HTTP routes and MCP tools.
+- JSONL audit logging.
+- MCP audit/status visibility in webapp Settings.
+- CORS origin allowlist, defaulting to no browser origins.
+- Basic per-IP/token rate limiting.
+- MCP client name capture in audit entries.
+
+Worth doing soon:
+- Add client-specific tool allowlists before connecting any always-on client.
+- Add confirmation rules before enabling any existing-note edit tools.
+- Add a small MCP client setup doc with LAN URL, token usage, and safe default tools.
+- Keep `MCP_TOKEN` separate from `APP_SECRET`; rotate it when adding a new client.
+- Keep public internet MCP unsupported unless there is a deliberate reverse-proxy/auth design.
+
+Future architecture:
 - Use a personal assistant gateway in the future if Second Brain, Home Assistant, finance tools, and other services need to be composed behind one voice interface.
 - Keep tool APIs narrow, auditable, and source-of-truth safe.
 - Reuse existing app operations instead of duplicating Markdown parsing/writing logic.
+- Move capability implementations behind `executeCapability()` into service modules such as capture, tasks, sprint, dashboard, vault search, chat, and audit services.
+- Keep MCP as a transport adapter, not a second app brain.
+- Keep OpenCode as the chat runtime unless a future assistant gateway deliberately changes that boundary.
+
+Future tools:
+- Task metadata update and weekly sprint checkbox tools.
+- Deep Work start/end/history tools.
+- Restricted `vault.search` and `vault.read_note`.
+- Chat/session workflow tools only after the auth and audit model is proven.
+- Review workflow tools for weekly/monthly review, about-me, and changelog style workflows.
 
 Security considerations:
 - No arbitrary shell execution.
 - No unrestricted vault reads.
 - No arbitrary file writes.
 - All paths must stay inside `VAULT_PATH`.
-- Network MCP must require dedicated authentication and preferably HTTPS.
+- Network MCP must require dedicated authentication and preferably HTTPS if exposed beyond trusted LAN.
 - Write tools should be allowlisted by client and audit logged.
 - The smart speaker should use high-level tools such as quick capture, create todo, today focus, sprint status, and chat, not raw vault access.
+- Future clients should get separate tokens and separate tool allowlists.
+- GitHub OAuth remains browser auth only; MCP should not depend on browser sessions.
+- Do not expose raw OpenCode control or shell access through MCP.
 
 Reference plan:
 - `docs/mcp-future-plan.md`
