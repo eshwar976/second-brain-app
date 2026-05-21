@@ -62,6 +62,7 @@ const state = {
   chatSessionPickerOpen: false,
   chatSessionQuery: "",
   captureSwipe: null,
+  taskSwipe: null,
   chatSuggestions: {
     open: false,
     trigger: "",
@@ -183,8 +184,10 @@ const taskSourceFilter = document.querySelector("#task-source-filter");
 const taskFilterClearButton = document.querySelector("#task-filter-clear");
 const taskViewButtons = Array.from(document.querySelectorAll("[data-task-view]"));
 const captureViewButtons = Array.from(document.querySelectorAll("[data-capture-view]"));
+const dashboardIdentity = document.querySelector("#dashboard-identity");
 const dashboardOverview = document.querySelector("#dashboard-overview");
 const dashboardCadenceToggle = document.querySelector("#dashboard-cadence-toggle");
+const dashboardHabits = document.querySelector("#dashboard-habits");
 const dashboardDeepWork = document.querySelector("#dashboard-deep-work");
 const dashboardDeepWorkRefresh = document.querySelector("#dashboard-deep-work-refresh");
 const sprintContent = document.querySelector("#sprint-content");
@@ -633,6 +636,10 @@ function wireInteractions() {
   });
 
   tasksList?.addEventListener("click", handleTaskActionClick);
+  tasksList?.addEventListener("pointerdown", handleTaskPointerDown);
+  tasksList?.addEventListener("pointermove", handleTaskPointerMove);
+  tasksList?.addEventListener("pointerup", handleTaskPointerUp);
+  tasksList?.addEventListener("pointercancel", resetTaskSwipe);
   sprintContent?.addEventListener("click", handleSprintClick);
   sprintContent?.addEventListener("change", handleSprintChange);
   sprintViewToggle?.addEventListener("click", handleSprintClick);
@@ -2498,10 +2505,10 @@ function renderSettingsDetails(config) {
   const ignoreList = Array.isArray(config.ignoreRules)
     ? `
       <details class="settings-ignore">
-        <summary>Ignored paths <span>${numberFormat(ignoreCount)}</span></summary>
+        <summary>Task-ignored paths <span>${numberFormat(ignoreCount)}</span></summary>
         <textarea data-ignore-rules rows="7" spellcheck="false" placeholder="4.Archive/">${escapeHtml(ignoreValue)}</textarea>
         <div class="settings-actions">
-          <button class="secondary-button" type="button" data-ignore-save>Save ignored paths</button>
+          <button class="secondary-button" type="button" data-ignore-save>Save task ignores</button>
         </div>
       </details>
     `
@@ -2557,7 +2564,7 @@ function renderSettingsDetails(config) {
       <div><span>Local URL</span><strong>${escapeHtml(config.localUrl)}</strong></div>
       <div><span>LAN URL</span><strong>${escapeHtml(config.lanUrl || "disabled")}</strong></div>
       <div><span>Write auth</span><strong>${config.authRequired ? "enabled" : "not set"}</strong></div>
-      <div><span>Ignored paths</span><strong>${numberFormat(ignoreCount)}</strong></div>
+      <div><span>Task ignores</span><strong>${numberFormat(ignoreCount)}</strong></div>
       <div class="${runtime.reachable ? "is-ok" : "is-warning"}"><span>${escapeHtml((config.chat?.provider || "chat").toUpperCase())}</span><strong>${escapeHtml(runtimeLabel)}</strong></div>
       <div><span>OpenCode URL</span><strong>${escapeHtml(config.chat?.opencodeBaseUrl || "not used")}</strong></div>
       <div><span>OpenCode agent</span><strong>${escapeHtml(config.chat?.agent || "not used")}</strong></div>
@@ -2598,8 +2605,8 @@ function renderSettingsDetails(config) {
       state.config.ignoreRules = data.rules || [];
       renderSettingsDetails(state.config);
       await refreshTaskSurfaces();
-      flashHelper("Ignored paths saved.");
-      showToast("Ignored paths saved.");
+      flashHelper("Task ignores saved.");
+      showToast("Task ignores saved.");
     } catch (error) {
       flashHelper(error.message);
       showToast(error.message, { duration: 3200 });
@@ -3252,6 +3259,63 @@ function resetCaptureSwipe() {
     card.style.removeProperty("--swipe-offset");
   }
   state.captureSwipe = null;
+}
+
+function handleTaskPointerDown(event) {
+  const row = event.target.closest("[data-task-id]");
+  if (!row || event.target.closest("button, select, textarea, input, a")) return;
+  row.setPointerCapture?.(event.pointerId);
+  state.taskSwipe = {
+    id: row.dataset.taskId,
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    active: true
+  };
+  row.classList.add("is-swipe-ready");
+}
+
+function handleTaskPointerMove(event) {
+  const swipe = state.taskSwipe;
+  if (!swipe?.active || swipe.pointerId !== event.pointerId) return;
+  const row = tasksList?.querySelector(`[data-task-id="${cssEscape(swipe.id)}"]`);
+  if (!row) return;
+  const dx = Math.max(0, event.clientX - swipe.startX);
+  const dy = Math.abs(event.clientY - swipe.startY);
+  if (dy > 42) {
+    resetTaskSwipe();
+    return;
+  }
+  if (dx > 10) event.preventDefault();
+  row.style.setProperty("--swipe-offset", `${Math.min(dx, 92)}px`);
+  row.classList.toggle("is-swiping", dx > 12);
+}
+
+async function handleTaskPointerUp(event) {
+  const swipe = state.taskSwipe;
+  if (!swipe?.active || swipe.pointerId !== event.pointerId) return;
+  const dx = event.clientX - swipe.startX;
+  const dy = Math.abs(event.clientY - swipe.startY);
+  const task = findTaskById(swipe.id);
+  resetTaskSwipe();
+  if (task && dx > 86 && dy < 44) {
+    event.preventDefault();
+    await setDailyFocus(task.text || "", { source: "task" });
+    setActiveTab("sprint");
+  }
+}
+
+function resetTaskSwipe() {
+  if (!state.taskSwipe?.id) {
+    state.taskSwipe = null;
+    return;
+  }
+  const row = tasksList?.querySelector(`[data-task-id="${cssEscape(state.taskSwipe.id)}"]`);
+  if (row) {
+    row.classList.remove("is-swipe-ready", "is-swiping");
+    row.style.removeProperty("--swipe-offset");
+  }
+  state.taskSwipe = null;
 }
 
 function openChatForCapture(capture) {
@@ -3916,7 +3980,7 @@ function renderIndexStatus() {
     </div>
     <div class="metric">
       <span class="metric-value">${numberFormat(status.skippedCount)}</span>
-      <span class="metric-label">Skipped paths</span>
+      <span class="metric-label">Task-ignored paths</span>
     </div>
     <p class="index-meta">Last indexed: ${escapeHtml(lastRun)}</p>
     <p class="index-meta">Watcher: ${escapeHtml(watcher)}</p>
@@ -3938,8 +4002,26 @@ function renderTasksBadge(count = null) {
 
 function renderDashboard() {
   if (!state.dashboard) return;
+  renderDashboardIdentity(state.dashboard.habits?.identity || null);
   renderPersonalSystemDashboard(state.dashboard.personalSystem || null);
+  renderHabitDashboard(state.dashboard.habits || null);
   renderDeepWorkDashboard(state.dashboard.deepWork || null);
+}
+
+function renderDashboardIdentity(identity) {
+  if (!dashboardIdentity) return;
+  const text = String(identity?.text || "").trim();
+  dashboardIdentity.hidden = !text;
+  if (!text) {
+    dashboardIdentity.innerHTML = "";
+    return;
+  }
+  dashboardIdentity.innerHTML = `
+    <div class="identity-card">
+      <span>Identity</span>
+      <p>${escapeHtml(text)}</p>
+    </div>
+  `;
 }
 
 function renderPersonalSystemDashboard(personalSystem) {
@@ -4019,6 +4101,136 @@ function renderPersonalSystemLinks(personalSystem = {}) {
       `).join("")}
     </div>
   `;
+}
+
+function renderHabitDashboard(habits) {
+  if (!dashboardHabits) return;
+  if (!habits?.available) {
+    dashboardHabits.innerHTML = `
+      <div class="empty-state compact-empty">
+        <p class="empty-title">No OKR habits found.</p>
+        <p>${escapeHtml(habits?.message || "Mark habit KRs in the active personal OKR file.")}</p>
+      </div>
+    `;
+    return;
+  }
+
+  const items = habits.items || [];
+  dashboardHabits.innerHTML = `
+    <div class="habit-summary">
+      <div>
+        <span>${numberFormat(items.filter((item) => item.todayDone).length)}</span>
+        <p>Done today</p>
+      </div>
+      <div>
+        <span>${numberFormat(habits.attentionCount || 0)}</span>
+        <p>Needs attention</p>
+      </div>
+    </div>
+    <div class="habit-list">
+      ${items.length ? items.map(renderHabitItem).join("") : `
+        <div class="empty-state compact-empty">
+          <p class="empty-title">No tracked habits yet.</p>
+          <p>Add <code>habit: true</code> to frequency KRs or use <code>type: habit</code>.</p>
+        </div>
+      `}
+    </div>
+    <div class="dashboard-note-links" aria-label="Habit source notes">
+      ${habits.okrPath ? `<button class="inline-note-link" type="button" data-open-note="${escapeHtml(habits.okrPath)}">Open OKRs</button>` : ""}
+      <span class="habit-range">${escapeHtml(formatHabitRange(habits))}</span>
+    </div>
+  `;
+}
+
+function renderHabitItem(item) {
+  const status = item.status || "attention";
+  const streak = Number(item.streak || 0);
+  const streakUnit = item.streakUnit || (item.cadence === "weekly" ? "week" : "day");
+  return `
+    <article class="habit-item habit-${escapeHtml(status)}">
+      <div class="habit-item-head">
+        <div>
+          <strong>${escapeHtml(item.description || item.activity || "Habit")}</strong>
+          <span>${escapeHtml(item.statusLabel || status)}</span>
+        </div>
+        <span class="habit-streak">${numberFormat(streak)} ${escapeHtml(streakUnit)}${streak === 1 ? "" : "s"} streak</span>
+      </div>
+      ${renderHabitProgressBar(item)}
+      <div class="habit-detail-row">
+        <p>${escapeHtml(formatHabitDetail(item))}</p>
+        ${renderHabitConsistency(item)}
+      </div>
+    </article>
+  `;
+}
+
+function renderHabitProgressBar(item) {
+  const current = Number(item.weekCount || 0);
+  const target = Number(item.target || 0);
+  const percent = target ? Math.max(0, Math.min(100, Math.round((current / target) * 100))) : 0;
+  return `
+    <div
+      class="progress-bar habit-progress-bar"
+      role="progressbar"
+      aria-valuemin="0"
+      aria-valuemax="100"
+      aria-valuenow="${escapeHtml(String(percent))}"
+      style="--progress-percent: ${escapeHtml(String(percent))}%"
+    >
+      <span></span>
+    </div>
+  `;
+}
+
+function renderHabitConsistency(item) {
+  const periods = item.periods || {};
+  const weeks = Array.isArray(periods.weeks) ? periods.weeks.slice(-12) : [];
+  const days = Array.isArray(periods.currentWeekDays) ? periods.currentWeekDays : [];
+  const cadence = item.cadence || "daily";
+  return `
+    <div class="habit-consistency habit-consistency-${escapeHtml(cadence)}" aria-label="${escapeHtml(item.description || item.activity || "Habit")} consistency">
+      ${weeks.map(renderHabitWeekDot).join("")}
+      ${days.length ? `
+        <span class="habit-current-week" aria-label="Current week">
+          ${days.map(renderHabitDayDot).join("")}
+        </span>
+      ` : ""}
+    </div>
+  `;
+}
+
+function renderHabitWeekDot(week) {
+  const label = `${formatShortDate(week.start)}: ${numberFormat(week.count || 0)}/${numberFormat(week.target || 0)}`;
+  return `
+    <span
+      class="habit-dot habit-dot-week habit-dot-${escapeHtml(week.status || "pending")} ${week.current ? "is-current" : ""}"
+      title="${escapeHtml(label)}"
+      aria-label="${escapeHtml(label)}"
+    ></span>
+  `;
+}
+
+function renderHabitDayDot(day) {
+  const label = `${formatShortDate(day.date)}: ${day.logged ? "logged" : (day.future ? "future" : "missed")}`;
+  return `
+    <span
+      class="habit-dot habit-dot-day habit-dot-${escapeHtml(day.status || "future")} ${day.today ? "is-today" : ""}"
+      title="${escapeHtml(label)}"
+      aria-label="${escapeHtml(label)}"
+    ></span>
+  `;
+}
+
+function formatHabitDetail(item) {
+  const parts = [];
+  if (item.activity) parts.push(`[activity:: ${item.activity}]`);
+  return parts.join(" - ");
+}
+
+function formatHabitRange(habits = {}) {
+  const quarter = habits.quarter || "Quarter";
+  const range = habits.start && habits.end ? `${formatShortDate(habits.start)}-${formatShortDate(habits.end)}` : "";
+  return [quarter, range].filter(Boolean).join(" - ");
 }
 
 function renderDeepWorkDashboard(deepWork) {
@@ -4148,11 +4360,20 @@ function formatCadenceDetail(item) {
 }
 
 function renderDashboardLoading() {
+  if (dashboardIdentity) {
+    dashboardIdentity.hidden = true;
+    dashboardIdentity.innerHTML = "";
+  }
   if (dashboardOverview) dashboardOverview.innerHTML = `<p class="quiet-line">Loading cadence state...</p>`;
+  if (dashboardHabits) dashboardHabits.innerHTML = `<p class="quiet-line">Loading habit state...</p>`;
   if (dashboardDeepWork) dashboardDeepWork.innerHTML = `<p class="quiet-line">Loading Deep Work history...</p>`;
 }
 
 function renderDashboardError(message) {
+  if (dashboardIdentity) {
+    dashboardIdentity.hidden = true;
+    dashboardIdentity.innerHTML = "";
+  }
   if (dashboardOverview) {
     dashboardOverview.innerHTML = `
       <div class="empty-state">
@@ -4163,6 +4384,9 @@ function renderDashboardError(message) {
   }
   if (dashboardDeepWork) {
     dashboardDeepWork.innerHTML = `<p class="quiet-line">${escapeHtml(message)}</p>`;
+  }
+  if (dashboardHabits) {
+    dashboardHabits.innerHTML = `<p class="quiet-line">${escapeHtml(message)}</p>`;
   }
 }
 
@@ -4195,9 +4419,11 @@ function initializeSprintOpenObjectives() {
 
 function renderPersonalSprint() {
   if (!sprintContent || !state.personalSprint) return;
-  const { sprint, okr, focus } = state.personalSprint;
+  const { sprint, okr, dailyFocus, focus } = state.personalSprint;
   renderSprintViewTabs(sprint);
   sprintContent.innerHTML = `
+    ${renderDailyFocus(dailyFocus)}
+
     <section class="sprint-card active-sprint-card ${sprint.isStale ? "is-stale" : ""}">
       <div class="sprint-card-head">
         <div>
@@ -4210,6 +4436,7 @@ function renderPersonalSprint() {
         </div>
       </div>
       ${sprint.isStale ? `<p class="sprint-warning">${escapeHtml(sprint.staleMessage || "Sprint is stale.")}</p>` : ""}
+      ${renderSprintIdentity(okr.identity)}
       <div class="sprint-priority">
         <span>Priority: KR ${escapeHtml(sprint.activeKr)}</span>
         <strong>${escapeHtml(sprint.activeKrDescription)}</strong>
@@ -4239,14 +4466,52 @@ function renderPersonalSprint() {
   `;
 }
 
+function renderSprintIdentity(identity) {
+  const text = String(identity?.text || "").trim();
+  if (!text) return "";
+  return `
+    <div class="sprint-identity">
+      <span>Identity</span>
+      <strong>${escapeHtml(text)}</strong>
+    </div>
+  `;
+}
+
+function renderDailyFocus(dailyFocus) {
+  const hasFocus = Boolean(dailyFocus?.available && dailyFocus.text);
+  return `
+    <section class="sprint-card daily-focus-card">
+      <div class="sprint-card-head">
+        <div>
+          <span class="sprint-kicker">Today's focus</span>
+          <h2>${hasFocus ? escapeHtml(dailyFocus.text) : "No highlight set"}</h2>
+        </div>
+        <div class="sprint-actions">
+          ${hasFocus ? `<button class="note-link-button" type="button" data-daily-focus-chat>Open in chat</button>` : ""}
+          <button class="note-link-button" type="button" data-daily-focus-edit>${hasFocus ? "Edit" : "Set focus"}</button>
+          ${hasFocus ? `<button class="note-link-button subtle-note-button" type="button" data-daily-focus-clear>Clear</button>` : ""}
+          ${renderObsidianNoteLink(dailyFocus?.path || state.personalSprint?.sprint?.path || "", "Open sprint")}
+        </div>
+      </div>
+      ${hasFocus ? `
+        <div class="sprint-priority daily-focus-priority">
+          <span>${escapeHtml(dailyFocus.date || "today")}${dailyFocus.source ? ` - ${escapeHtml(dailyFocus.source)}` : ""}</span>
+          <strong>${escapeHtml(dailyFocus.text)}</strong>
+        </div>
+      ` : `<p class="quiet-line">Set the one thing that should get your best attention today.</p>`}
+    </section>
+  `;
+}
+
 function renderSprintFocus(focus) {
   const hasFocus = Boolean(focus?.available && focus.title);
+  if (!hasFocus) return "";
   return `
     <section class="sprint-card focus-card">
       <div class="sprint-card-head">
         <div>
-          <span class="sprint-kicker">Focus</span>
-          <h2>${hasFocus ? escapeHtml(focus.title) : "No active focus"}</h2>
+          <span class="sprint-kicker">Active idea</span>
+          <h2>${hasFocus ? escapeHtml(focus.title) : "No active idea"}</h2>
         </div>
         <div class="sprint-actions">
           ${hasFocus ? `<button class="note-link-button" type="button" data-focus-chat>Open in chat</button>` : ""}
@@ -4254,13 +4519,11 @@ function renderSprintFocus(focus) {
           ${renderObsidianNoteLink(focus?.ledgerPath || "", "Open ledger")}
         </div>
       </div>
-      ${hasFocus ? `
-        <div class="sprint-priority focus-priority">
-          <span>Active idea slot</span>
-          <strong>${escapeHtml(focus.doneLooksLike || "Define the finish line in the idea ledger.")}</strong>
-          ${focus.started ? `<small>Started ${escapeHtml(focus.started)}</small>` : ""}
-        </div>
-      ` : `<p class="quiet-line">Add one idea under Active in the idea ledger.</p>`}
+      <div class="sprint-priority focus-priority">
+        <span>Active idea slot</span>
+        <strong>${escapeHtml(focus.doneLooksLike || "Define the finish line in the idea ledger.")}</strong>
+        ${focus.started ? `<small>Started ${escapeHtml(focus.started)}</small>` : ""}
+      </div>
     </section>
   `;
 }
@@ -4418,6 +4681,27 @@ function handleSprintClick(event) {
     return;
   }
 
+  const dailyFocusChatButton = event.target.closest("[data-daily-focus-chat]");
+  if (dailyFocusChatButton) {
+    event.preventDefault();
+    openDailyFocusInChat();
+    return;
+  }
+
+  const dailyFocusEditButton = event.target.closest("[data-daily-focus-edit]");
+  if (dailyFocusEditButton) {
+    event.preventDefault();
+    promptDailyFocus();
+    return;
+  }
+
+  const dailyFocusClearButton = event.target.closest("[data-daily-focus-clear]");
+  if (dailyFocusClearButton) {
+    event.preventDefault();
+    setDailyFocus("");
+    return;
+  }
+
   const krChatButton = event.target.closest("[data-kr-chat]");
   if (krChatButton) {
     event.preventDefault();
@@ -4471,38 +4755,55 @@ function openSprintInChat() {
   }]);
 }
 
+function promptDailyFocus() {
+  const current = state.personalSprint?.dailyFocus?.text || "";
+  const next = window.prompt("Today's focus", current);
+  if (next === null) return;
+  setDailyFocus(next);
+}
+
+async function setDailyFocus(text, { source = "webapp" } = {}) {
+  const trimmed = String(text || "").trim();
+  try {
+    showToast(trimmed ? "Saving focus..." : "Clearing focus...");
+    state.personalSprint = await postJson("/api/personal-sprint/daily-focus", {
+      text: trimmed,
+      source,
+      view: state.personalSprintView
+    });
+    state.personalSprintView = state.personalSprint?.sprint?.view || state.personalSprintView;
+    renderPersonalSprint();
+    showToast(trimmed ? "Today's focus saved." : "Today's focus cleared.");
+  } catch (error) {
+    showToast(error.message, { duration: 3200 });
+  }
+}
+
+function openDailyFocusInChat() {
+  const dailyFocus = state.personalSprint?.dailyFocus;
+  const sprint = state.personalSprint?.sprint;
+  if (!dailyFocus?.available) return;
+  const message = [
+    "Let's work through today's focus.",
+    `Focus: ${dailyFocus.text}`,
+    sprint ? `Sprint: ${formatSprintRange(sprint.start, sprint.end)}` : ""
+  ].filter(Boolean).join("\n");
+  startChatWithDraft(message, [
+    sprint?.path ? {
+      kind: "file",
+      title: "Sprint Plan",
+      name: "Sprint Plan",
+      token: "sprint-plan",
+      path: sprint.path
+    } : null
+  ].filter(Boolean));
+}
+
 async function openSprintCategorizeSession() {
   if (sprintCategorizeButton) sprintCategorizeButton.disabled = true;
   try {
     showToast("Opening categorization chat...");
-    const sprint = state.personalSprint?.sprint;
-    const okr = state.personalSprint?.okr;
-    const focus = state.personalSprint?.focus;
-    const contextItems = [
-      sprint?.path ? {
-        kind: "file",
-        title: "Sprint Plan",
-        name: "Sprint Plan",
-        token: "sprint-plan",
-        path: sprint.path
-      } : null,
-      okr?.path ? {
-        kind: "file",
-        title: "Personal OKRs",
-        name: "Personal OKRs",
-        token: "personal-okrs",
-        path: okr.path
-      } : null,
-      focus?.ledgerPath ? {
-        kind: "file",
-        title: "Idea Ledger",
-        name: "Idea Ledger",
-        token: "idea-ledger",
-        path: focus.ledgerPath
-      } : null
-    ].filter(Boolean);
-
-    await startChatWithPrompt("Categorize fleeting note with domain and activity for pending ones. Identify if any sources are needed", contextItems);
+    await startChatWithPrompt("Categorize fleeting note with domain and activity for pending ones. Identify if any sources are needed", []);
   } finally {
     if (sprintCategorizeButton) sprintCategorizeButton.disabled = false;
   }

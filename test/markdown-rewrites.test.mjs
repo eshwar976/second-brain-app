@@ -16,6 +16,14 @@ test("todo capture, edit, and triage preserve Obsidian-friendly Markdown", async
 
   try {
     await mkdir(path.join(vaultPath, "2.Areas", "Personal", "fleeting"), { recursive: true });
+    await mkdir(path.join(vaultPath, "3.Resources"), { recursive: true });
+    await writeFile(path.join(vaultPath, "3.Resources", "ignored-chat-note.md"), [
+      "# Ignored Chat Note",
+      "",
+      "This note should remain available to chat and file lookup even though tasks ignore 3.Resources.",
+      "",
+      "- [ ] ignored resource task [type:: todo]"
+    ].join("\n"));
     server = spawn(process.execPath, [serverPath.pathname], {
       cwd: path.dirname(serverPath.pathname),
       env: {
@@ -65,6 +73,10 @@ test("todo capture, edit, and triage preserve Obsidian-friendly Markdown", async
     assert.equal(tasks.tasks[0].text, "write test task");
     assert.equal(tasks.tasks[0].due, "2026-05-12");
     assert.equal(tasks.tasks[0].effort, "5m");
+    assert.ok(tasks.tasks.every((task) => task.text !== "ignored resource task"));
+
+    const filePicker = await getJson(`http://127.0.0.1:${port}/api/chat/references?kind=file&q=ignored-chat-note`, secret);
+    assert.ok(filePicker.suggestions.some((suggestion) => suggestion.path === "3.Resources/ignored-chat-note.md"));
 
     await postJson(`http://127.0.0.1:${port}/api/tasks/update`, secret, {
       taskId: tasks.tasks[0].id,
@@ -388,6 +400,7 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
       "    objective-title: \"Establish health baseline\"",
       "    description: \"Go to the gym at least 3x/week\"",
       "    type: frequency",
+      "    habit: true",
       "    target: 3",
       "    unit: sessions/week",
       "    activity: gym",
@@ -398,6 +411,7 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
       "    description: \"Apply psoriasis ointment consistently\"",
       "    type: habit",
       "    activity: ointment",
+      "    weekly-target: 2",
       "    status: in-progress",
       "  - id: \"1.4\"",
       "    objective: 1",
@@ -407,6 +421,10 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
       "    activity: annual-physical",
       "    status: done",
       "---",
+      "# Identity",
+      "",
+      "I'm a person who takes care of myself.",
+      "",
       "# OKRs"
     ].join("\n"), "utf8");
     await writeFile(path.join(vaultPath, "2.Areas", "Personal", "fleeting", "2026-05.md"), [
@@ -480,6 +498,8 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
     assert.equal(sprint.focus.doneLooksLike, "Focus tab visible between sprint and OKRs");
     assert.equal(sprint.focus.ideaPath, "2.Areas/Personal/Ideas/secondbrain-webapp/idea.md");
     assert.equal(sprint.focus.ledgerPath, "2.Areas/Personal/Ideas/idea-ledger.md");
+    assert.equal(sprint.dailyFocus.available, false);
+    assert.equal(sprint.dailyFocus.path, "2.Areas/Personal/OKRs/FY2027/Q1/sprints/sprint-2026-05-11.md");
     assert.equal(sprint.okr.objectives.length, 1);
     assert.equal(sprint.okr.objectives[0].keyResults[0].progress.current, 1);
     assert.equal(sprint.okr.objectives[0].keyResults[0].progress.target, 3);
@@ -490,6 +510,46 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
     assert.equal(sprint.okr.objectives[0].keyResults[2].progress.current, 1);
     assert.equal(sprint.okr.objectives[0].keyResults[2].progress.target, 1);
     assert.equal(sprint.okr.objectives[0].keyResults[2].progress.percent, 100);
+    assert.equal(sprint.okr.identity.available, true);
+    assert.equal(sprint.okr.identity.text, "I'm a person who takes care of myself.");
+
+    const dashboard = await getJson(`http://127.0.0.1:${port}/api/dashboard`, secret);
+    assert.equal(dashboard.habits.available, true);
+    assert.equal(dashboard.habits.okrPath, "2.Areas/Personal/OKRs/FY2027/Q1/personal-Q1-FY2027.md");
+    assert.equal(dashboard.habits.identity.text, "I'm a person who takes care of myself.");
+    assert.equal(dashboard.habits.count, 2);
+    const gymHabit = dashboard.habits.items.find((item) => item.activity === "gym");
+    const ointmentHabit = dashboard.habits.items.find((item) => item.activity === "ointment");
+    assert.equal(gymHabit.weekCount, 1);
+    assert.equal(gymHabit.target, 3);
+    assert.equal(gymHabit.quarterDays, 2);
+    assert.equal(gymHabit.streakUnit, "week");
+    assert.equal(gymHabit.streak, 0);
+    assert.ok(gymHabit.periods.weeks.some((week) => week.current));
+    assert.equal(ointmentHabit.quarterDays, 4);
+    assert.equal(ointmentHabit.target, 2);
+    assert.equal(ointmentHabit.streakUnit, "day");
+    assert.ok(Array.isArray(ointmentHabit.periods.currentWeekDays));
+    assert.ok(ointmentHabit.periods.weeks.some((week) => week.status === "done"));
+
+    await writeFile(path.join(vaultPath, "2.Areas", "Personal", "Ideas", "idea-ledger.md"), [
+      "# Idea Ledger",
+      "",
+      "## 🔴 Active (1 slot only)",
+      "",
+      "| Idea | Score | Done Looks Like | Started |",
+      "|------|-------|----------------|---------|",
+      "| _Slot open_ | | | |",
+      "",
+      "## 🟠 Reviewing (does not block active slot)",
+      "",
+      "| Idea | Score | Done Looks Like | Reviewing Since |",
+      "|------|-------|----------------|-----------------|",
+      "| [Sure.am Finance](Ideas/sure-am-finance/idea.md) | **20/24** | All accounts visible | 2026-05-18 |"
+    ].join("\n"), "utf8");
+    const noActiveIdeaSprint = await getJson(`http://127.0.0.1:${port}/api/personal-sprint`, secret);
+    assert.equal(noActiveIdeaSprint.focus.available, false);
+    assert.equal(noActiveIdeaSprint.focus.title, "");
 
     const lastSprint = await getJson(`http://127.0.0.1:${port}/api/personal-sprint?view=last`, secret);
     assert.equal(lastSprint.sprint.path, "2.Areas/Personal/OKRs/FY2027/Q0/sprints/sprint-2026-04-01.md");
@@ -508,9 +568,25 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
       done: true
     });
 
-    const markdown = await readFile(sprintPath, "utf8");
+    let markdown = await readFile(sprintPath, "utf8");
     assert.match(markdown, /week: "2026-05-11"\n\s+label: "Week of May 11"\n\s+done: true/);
     assert.match(markdown, /week: "2026-05-18"\n\s+label: "Week of May 18"\n\s+done: false/);
+
+    const focusedSprint = await postJson(`http://127.0.0.1:${port}/api/personal-sprint/daily-focus`, secret, {
+      text: "Finish daily focus support",
+      source: "task"
+    });
+    assert.equal(focusedSprint.dailyFocus.available, true);
+    assert.equal(focusedSprint.dailyFocus.text, "Finish daily focus support");
+    assert.equal(focusedSprint.dailyFocus.source, "task");
+    markdown = await readFile(sprintPath, "utf8");
+    assert.match(markdown, /## Daily Focus\n\n- \[date:: \d{4}-\d{2}-\d{2}] \[focus:: Finish daily focus support] \[source:: task]/);
+
+    await postJson(`http://127.0.0.1:${port}/api/personal-sprint/daily-focus`, secret, {
+      text: ""
+    });
+    markdown = await readFile(sprintPath, "utf8");
+    assert.doesNotMatch(markdown, /\[focus:: Finish daily focus support]/);
   } finally {
     if (server) server.kill("SIGTERM");
     await rm(vaultPath, { recursive: true, force: true });
@@ -724,14 +800,14 @@ test("auth mode can use GitHub for public host and passcode for LAN host", async
     await waitForServer(`http://127.0.0.1:${port}/api/health`);
 
     const publicConfigResponse = await fetch(`http://127.0.0.1:${port}/api/config/public`, {
-      headers: { Host: "secondbrain.vamshisasi.com" }
+      headers: { "X-Forwarded-Host": "secondbrain.vamshisasi.com" }
     });
     const publicConfig = await publicConfigResponse.json();
     assert.equal(publicConfig.authMode, "github");
     assert.equal(publicConfig.githubAvailable, true);
 
     const lanConfigResponse = await fetch(`http://127.0.0.1:${port}/api/config/public`, {
-      headers: { Host: "192.168.68.5:3030" }
+      headers: { "X-Forwarded-Host": "192.168.68.5:3030" }
     });
     const lanConfig = await lanConfigResponse.json();
     assert.equal(lanConfig.authMode, "passcode");
@@ -739,14 +815,14 @@ test("auth mode can use GitHub for public host and passcode for LAN host", async
     assert.equal(lanConfig.passcodeAvailable, true);
 
     const publicTasksResponse = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
-      headers: { Host: "secondbrain.vamshisasi.com" }
+      headers: { "X-Forwarded-Host": "secondbrain.vamshisasi.com" }
     });
     const publicTasks = await publicTasksResponse.json();
     assert.equal(publicTasksResponse.status, 401);
     assert.equal(publicTasks.error, "Not authenticated.");
 
     const lanTasksResponse = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
-      headers: { Host: "192.168.68.5:3030" }
+      headers: { "X-Forwarded-Host": "192.168.68.5:3030" }
     });
     const lanTasks = await lanTasksResponse.json();
     assert.equal(lanTasksResponse.status, 401);
@@ -754,7 +830,7 @@ test("auth mode can use GitHub for public host and passcode for LAN host", async
 
     const lanAuthedTasksResponse = await fetch(`http://127.0.0.1:${port}/api/tasks`, {
       headers: {
-        Host: "192.168.68.5:3030",
+        "X-Forwarded-Host": "192.168.68.5:3030",
         "X-Second-Brain-Secret": secret
       }
     });

@@ -2125,6 +2125,10 @@ h1 {
   gap: 10px;
 }
 
+.index-section {
+  order: 99;
+}
+
 .metric {
   min-width: 0;
   border: 1px solid rgba(221, 214, 204, 0.82);
@@ -2245,6 +2249,39 @@ h1 {
 
 .dashboard-section-wide {
   grid-column: 1 / -1;
+}
+
+.identity-section {
+  border-color: rgba(36, 116, 122, 0.24);
+  background: linear-gradient(135deg, rgba(36, 116, 122, 0.08), rgba(255, 252, 247, 0.92) 50%);
+}
+
+:root[data-theme="dark"] .identity-section {
+  border-color: rgba(145, 213, 216, 0.28);
+  background: linear-gradient(135deg, rgba(145, 213, 216, 0.11), rgba(32, 33, 30, 0.9) 54%);
+}
+
+.identity-card {
+  display: grid;
+  gap: 7px;
+}
+
+.identity-card span,
+.sprint-identity span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.identity-card p {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 850;
+  line-height: 1.35;
+  white-space: pre-wrap;
 }
 
 .section-heading-row {
@@ -2587,6 +2624,226 @@ h1 {
   gap: 12px;
 }
 
+.habit-dashboard {
+  display: grid;
+  gap: 12px;
+}
+
+.habit-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.habit-summary div {
+  min-width: 0;
+  border: 1px solid rgba(36, 116, 122, 0.2);
+  border-radius: 8px;
+  background: rgba(36, 116, 122, 0.06);
+  padding: 12px;
+}
+
+:root[data-theme="dark"] .habit-summary div {
+  border-color: rgba(145, 213, 216, 0.24);
+  background: rgba(145, 213, 216, 0.08);
+}
+
+.habit-summary span {
+  display: block;
+  color: var(--text);
+  font-size: 22px;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.habit-summary p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.habit-list {
+  display: grid;
+  gap: 8px;
+}
+
+.habit-item {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid rgba(221, 214, 204, 0.82);
+  border-left: 4px solid rgba(184, 121, 31, 0.7);
+  border-radius: 8px;
+  background: rgba(255, 252, 247, 0.72);
+  padding: 11px 12px;
+}
+
+.habit-current {
+  border-left-color: rgba(36, 116, 122, 0.62);
+}
+
+:root[data-theme="dark"] .habit-item {
+  border-color: rgba(59, 57, 51, 0.9);
+  border-left-color: rgba(240, 195, 111, 0.78);
+  background: rgba(22, 23, 20, 0.4);
+}
+
+:root[data-theme="dark"] .habit-current {
+  border-left-color: rgba(145, 213, 216, 0.78);
+}
+
+.habit-item-head {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.habit-item-head div {
+  min-width: 0;
+}
+
+.habit-item-head strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.habit-item-head span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.habit-streak {
+  flex: 0 0 auto;
+  color: var(--teal);
+}
+
+.habit-progress-bar {
+  height: 8px;
+}
+
+.habit-detail-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.habit-item p,
+.habit-range {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.habit-consistency {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 2px 0;
+}
+
+.habit-detail-row .habit-consistency {
+  justify-content: flex-end;
+}
+
+.habit-current-week {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-left: 1px solid rgba(129, 121, 108, 0.28);
+  margin-left: 1px;
+  padding-left: 8px;
+}
+
+.habit-dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(129, 121, 108, 0.26);
+  box-shadow: inset 0 0 0 1px rgba(89, 83, 73, 0.12);
+}
+
+.habit-dot-week {
+  width: 15px;
+  height: 15px;
+}
+
+.habit-dot-day {
+  width: 8px;
+  height: 8px;
+}
+
+.habit-dot-done {
+  background: rgba(106, 139, 106, 0.9);
+  box-shadow: 0 0 0 2px rgba(106, 139, 106, 0.12);
+}
+
+.habit-dot-partial,
+.habit-dot-pending {
+  background: rgba(214, 169, 87, 0.88);
+  box-shadow: 0 0 0 2px rgba(214, 169, 87, 0.12);
+}
+
+.habit-dot-missed {
+  background: rgba(177, 91, 75, 0.9);
+  box-shadow: 0 0 0 2px rgba(177, 91, 75, 0.12);
+}
+
+.habit-dot-future {
+  background: rgba(129, 121, 108, 0.2);
+  box-shadow: inset 0 0 0 1px rgba(129, 121, 108, 0.24);
+}
+
+.habit-dot.is-current,
+.habit-dot.is-today {
+  outline: 2px solid rgba(36, 116, 122, 0.26);
+  outline-offset: 2px;
+}
+
+:root[data-theme="dark"] .habit-current-week {
+  border-left-color: rgba(217, 210, 196, 0.16);
+}
+
+:root[data-theme="dark"] .habit-dot {
+  background: rgba(217, 210, 196, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(217, 210, 196, 0.12);
+}
+
+:root[data-theme="dark"] .habit-dot-done {
+  background: rgba(145, 176, 132, 0.9);
+  box-shadow: 0 0 0 2px rgba(145, 176, 132, 0.12);
+}
+
+:root[data-theme="dark"] .habit-dot-partial,
+:root[data-theme="dark"] .habit-dot-pending {
+  background: rgba(240, 195, 111, 0.9);
+  box-shadow: 0 0 0 2px rgba(240, 195, 111, 0.12);
+}
+
+:root[data-theme="dark"] .habit-dot-missed {
+  background: rgba(201, 113, 94, 0.92);
+  box-shadow: 0 0 0 2px rgba(201, 113, 94, 0.12);
+}
+
+:root[data-theme="dark"] .habit-dot-future {
+  background: rgba(217, 210, 196, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(217, 210, 196, 0.14);
+}
+
 .deep-work-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2873,6 +3130,12 @@ h1 {
   text-decoration: none;
 }
 
+.subtle-note-button {
+  border-color: rgba(118, 112, 102, 0.2);
+  background: rgba(118, 112, 102, 0.06);
+  color: var(--muted);
+}
+
 .sprint-card.is-stale {
   border-color: rgba(184, 121, 31, 0.28);
 }
@@ -2887,6 +3150,29 @@ h1 {
   font-weight: 800;
   line-height: 1.35;
   padding: 9px 10px;
+}
+
+.sprint-identity {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+  border: 1px solid rgba(36, 116, 122, 0.18);
+  border-radius: 8px;
+  background: rgba(36, 116, 122, 0.055);
+  padding: 9px 10px;
+}
+
+.sprint-identity strong {
+  max-width: 72ch;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+:root[data-theme="dark"] .sprint-identity {
+  border-color: rgba(145, 213, 216, 0.22);
+  background: rgba(145, 213, 216, 0.08);
 }
 
 .sprint-priority {
@@ -2913,9 +3199,30 @@ h1 {
   background: linear-gradient(135deg, rgba(184, 121, 31, 0.08), rgba(255, 252, 247, 0.92) 48%);
 }
 
+.daily-focus-card {
+  border-color: rgba(36, 116, 122, 0.24);
+  background: linear-gradient(135deg, rgba(36, 116, 122, 0.08), rgba(255, 252, 247, 0.92) 50%);
+}
+
 :root[data-theme="dark"] .focus-card {
   border-color: rgba(184, 121, 31, 0.28);
   background: linear-gradient(135deg, rgba(184, 121, 31, 0.12), rgba(32, 33, 30, 0.92) 52%);
+}
+
+:root[data-theme="dark"] .daily-focus-card {
+  border-color: rgba(36, 116, 122, 0.28);
+  background: linear-gradient(135deg, rgba(36, 116, 122, 0.13), rgba(32, 33, 30, 0.92) 52%);
+}
+
+.daily-focus-card h2 {
+  max-width: 48ch;
+  line-height: 1.25;
+}
+
+.daily-focus-priority strong {
+  max-width: 72ch;
+  font-size: 15px;
+  line-height: 1.45;
 }
 
 .focus-priority strong {
@@ -3392,7 +3699,9 @@ h1 {
   grid-template-columns: 44px minmax(0, 1fr);
   gap: 0;
   padding: 12px 44px 12px 12px;
+  transform: translateX(var(--swipe-offset, 0));
   transition: opacity 260ms ease, transform 260ms ease, background 260ms ease, border-color 260ms ease;
+  touch-action: pan-y;
 }
 
 .task-checkbox {
@@ -3759,6 +4068,34 @@ h1 {
 }
 
 .capture-bubble.is-swiping::before {
+  opacity: 1;
+  transform: translateX(-72px);
+}
+
+.task-row::before {
+  content: "Focus";
+  position: absolute;
+  inset: 10px auto 10px 10px;
+  z-index: 1;
+  display: grid;
+  min-width: 58px;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(36, 116, 122, 0.11);
+  color: var(--teal);
+  font-size: 11px;
+  font-weight: 850;
+  opacity: 0;
+  transform: translateX(-8px);
+  transition: opacity 160ms ease, transform 160ms ease;
+  pointer-events: none;
+}
+
+.task-row.is-swiping {
+  box-shadow: -72px 0 0 rgba(36, 116, 122, 0.08);
+}
+
+.task-row.is-swiping::before {
   opacity: 1;
   transform: translateX(-72px);
 }

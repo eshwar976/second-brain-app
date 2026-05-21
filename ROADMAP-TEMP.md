@@ -8,8 +8,9 @@ Last updated: 2026-05-14
 
 1. Phase 5: AI Workflows
 2. Phase 6: Packaging / Maintenance
-3. Optional polish from earlier phases
-4. Rename / branding pass, including possible rename to Flowise
+3. Future MCP server plan
+4. Optional polish from earlier phases
+5. Rename / branding pass, including possible rename to Flowise
 
 ## Phase 1: Stabilization
 
@@ -204,7 +205,31 @@ Planned:
 - Maintenance checklist. Done: `docs/maintenance-checklist.md` with weekly/monthly checks.
 - Rename / branding decision. Deferred per user request.
 - Docker build. Ignored/deferred per user request.
-- MCP server. Next candidate phase after docs; initial recommendation is local stdio MCP.
+- MCP server. Deferred as a future feature enhancement; architecture and security plan captured in `docs/mcp-future-plan.md`.
+
+## Future Feature Enhancement: MCP Server
+
+Status: Planned, not started.
+
+Plan:
+- Keep MCP deferred until there is a concrete client such as a local assistant, smart speaker, or Home Assistant workflow.
+- Start with a local stdio MCP server before any network MCP exposure.
+- Treat network MCP as a later, explicitly secured layer for assistant/smart-speaker use.
+- Use a personal assistant gateway in the future if Second Brain, Home Assistant, finance tools, and other services need to be composed behind one voice interface.
+- Keep tool APIs narrow, auditable, and source-of-truth safe.
+- Reuse existing app operations instead of duplicating Markdown parsing/writing logic.
+
+Security considerations:
+- No arbitrary shell execution.
+- No unrestricted vault reads.
+- No arbitrary file writes.
+- All paths must stay inside `VAULT_PATH`.
+- Network MCP must require dedicated authentication and preferably HTTPS.
+- Write tools should be allowlisted by client and audit logged.
+- The smart speaker should use high-level tools such as quick capture, create todo, today focus, sprint status, and chat, not raw vault access.
+
+Reference plan:
+- `docs/mcp-future-plan.md`
 
 Flowise rename:
 - Recommended timing: Phase 6, after AI workflows are stable.

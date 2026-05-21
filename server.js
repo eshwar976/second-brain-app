@@ -228,6 +228,12 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, await updatePersonalSprintCheckbox(body));
     }
 
+    if (url.pathname === "/api/personal-sprint/daily-focus" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return sendJson(res, 200, await updatePersonalSprintDailyFocus(body));
+    }
+
     if (url.pathname === "/api/notes/search" && req.method === "GET") {
       requireWriteAuth(req);
       const query = url.searchParams.get("q") || "";
@@ -832,8 +838,9 @@ async function updateEditableIndexIgnoreRules(body = {}) {
 
   await fs.mkdir(path.dirname(INDEX_IGNORE_FILE), { recursive: true });
   const markdown = [
-    "# Vault index ignore rules",
+    "# Task ignore rules",
     "# One vault-relative file or folder per line. Simple * wildcards are supported.",
+    "# These paths are hidden from Tasks only; chat and file lookup still index notes.",
     ...rules
   ].join("\n");
   await fs.writeFile(INDEX_IGNORE_FILE, `${markdown}\n`, "utf8");
@@ -978,6 +985,10 @@ async function performVaultIndex({ reason = "manual" } = {}) {
       continue;
     }
     notes.push(note);
+    if (shouldSkipRelativeVaultPath(note.path)) {
+      skipped.count += 1;
+      continue;
+    }
     tasks.push(...extractTasks(note, markdown));
   }
 
@@ -1066,7 +1077,7 @@ function handleVaultWatchEvent(eventType, filename) {
 function shouldIgnoreWatchEvent(relativePath) {
   const normalized = String(relativePath || "").replaceAll("\\", "/");
   if (!normalized.toLowerCase().endsWith(".md")) return true;
-  return shouldSkipRelativeVaultPath(normalized);
+  return shouldSkipVaultPathForIndex(normalized);
 }
 
 function scheduleVaultIndex(reason, delayMs = WATCH_DEBOUNCE_MS) {
@@ -4012,9 +4023,10 @@ function clipText(value, length) {
 
 async function getDashboard() {
   await ensureIndexSchema();
-  const [status, personalSystem, deepWork] = await Promise.all([
+  const [status, personalSystem, habitDashboard, deepWork] = await Promise.all([
     getIndexStatus(),
     getPersonalSystemDashboard(),
+    getHabitDashboard(),
     listDeepWorkSessions(5)
   ]);
   const dueSoonCutoff = addDays(new Date(), 7);
@@ -4041,8 +4053,98 @@ async function getDashboard() {
     index: status,
     taskSummary: normalizeTaskSummary(taskSummary[0] || {}),
     personalSystem,
+    habits: habitDashboard,
     deepWork
   };
+}
+
+async function getHabitDashboard() {
+  try {
+    const selectedSprint = await resolvePersonalSprintStatePath("current");
+    const sprintMarkdown = await readVaultMarkdownFile(selectedSprint.path, "No active sprint found.");
+    const { frontmatter: sprintFrontmatter } = splitFrontmatter(sprintMarkdown);
+    const sprintMeta = parseSprintFrontmatter(sprintFrontmatter);
+    if (!sprintMeta.okrFile) return {
+      available: false,
+      message: "Current sprint does not point to an OKR file.",
+      items: []
+    };
+
+    const okrPath = normalizeVaultRelativeMarkdownPath(sprintMeta.okrFile);
+    const okrMarkdown = await readVaultMarkdownFile(okrPath, `OKR file not found: ${okrPath}`);
+    const { frontmatter: okrFrontmatter, body: okrBody } = splitFrontmatter(okrMarkdown);
+    const okrMeta = parseOkrFrontmatter(okrFrontmatter);
+    const identity = extractOkrIdentity(okrBody);
+    const quarterRange = getOkrQuarterRange(okrMeta, sprintMeta);
+    const habitKrs = okrMeta.keyResults.filter((kr) => isTrackedHabitKr(kr));
+    const today = formatDate(new Date());
+    const currentWeekStart = getIsoWeekStart(today);
+    const currentWeekEnd = addDaysToIsoDate(currentWeekStart, 6);
+    const items = [];
+
+    for (const kr of habitKrs) {
+      const counts = await countHabitActivityDates({
+        activity: kr.activity,
+        start: quarterRange.start,
+        end: quarterRange.end
+      });
+      const weekCount = counts.dates.filter((date) => date >= currentWeekStart && date <= currentWeekEnd).length;
+      const todayDone = counts.dates.includes(today);
+      const weeklyTarget = getHabitWeeklyTarget(kr);
+      const cadence = kr.cadence || (kr.type === "frequency" ? "weekly" : "daily");
+      const periods = getHabitConsistencyPeriods({
+        activityDates: counts.dates,
+        start: quarterRange.start,
+        end: quarterRange.end,
+        today,
+        cadence,
+        weeklyTarget
+      });
+      const status = getHabitStatus({ kr, todayDone, weekCount, weeklyTarget });
+      items.push({
+        id: kr.id,
+        objective: kr.objective,
+        objectiveTitle: kr.objectiveTitle,
+        description: kr.description,
+        activity: kr.activity,
+        domain: kr.domain,
+        cadence,
+        type: kr.type,
+        target: weeklyTarget,
+        unit: kr.unit,
+        todayDone,
+        weekCount,
+        periods,
+        quarterDays: counts.dates.length,
+        quarterLogs: counts.totalLogs,
+        streak: cadence === "weekly" ? getWeeklyHabitStreak(periods.weeks) : getActivityStreak(counts.dates, today),
+        streakUnit: cadence === "weekly" ? "week" : "day",
+        status,
+        statusLabel: formatHabitStatusLabel(status, { todayDone, weekCount, weeklyTarget })
+      });
+    }
+
+    return {
+      available: true,
+      okrPath,
+      quarter: okrMeta.quarter || sprintMeta.quarter || "",
+      start: quarterRange.start,
+      end: quarterRange.end,
+      today,
+      currentWeekStart,
+      currentWeekEnd,
+      count: items.length,
+      attentionCount: items.filter((item) => item.status !== "current").length,
+      identity,
+      items
+    };
+  } catch (error) {
+    return {
+      available: false,
+      message: error.statusCode === 404 ? error.message : "Habit tracking is unavailable.",
+      items: []
+    };
+  }
 }
 
 async function getPersonalSystemDashboard() {
@@ -4135,14 +4237,15 @@ async function getPersonalSystemDashboard() {
 async function getPersonalSprint(view = "") {
   const selectedSprint = await resolvePersonalSprintStatePath(view);
   const sprintMarkdown = await readVaultMarkdownFile(selectedSprint.path, "No active sprint — run personal sprint planning.");
-  const { frontmatter: sprintFrontmatter } = splitFrontmatter(sprintMarkdown);
+  const { frontmatter: sprintFrontmatter, body: sprintBody } = splitFrontmatter(sprintMarkdown);
   const sprintMeta = parseSprintFrontmatter(sprintFrontmatter);
   if (!sprintMeta.okrFile) throw httpError(404, "OKR file not found in sprint-state frontmatter.");
   const okrPath = normalizeVaultRelativeMarkdownPath(sprintMeta.okrFile);
 
   const okrMarkdown = await readVaultMarkdownFile(okrPath, `OKR file not found: ${okrPath}`);
-  const { frontmatter: okrFrontmatter } = splitFrontmatter(okrMarkdown);
+  const { frontmatter: okrFrontmatter, body: okrBody } = splitFrontmatter(okrMarkdown);
   const okrMeta = parseOkrFrontmatter(okrFrontmatter);
+  const identity = extractOkrIdentity(okrBody);
   const activities = Array.from(new Set([
     sprintMeta.activeKrActivity,
     ...okrMeta.keyResults.map((kr) => kr.activity)
@@ -4157,6 +4260,7 @@ async function getPersonalSprint(view = "") {
   const currentWeekEnd = addDaysToIsoDate(currentWeekStart, 6);
   const isStale = Boolean(sprintMeta.sprintEnd && today > sprintMeta.sprintEnd);
   const activeKr = okrMeta.keyResults.find((kr) => kr.id === sprintMeta.activeKr) || null;
+  const dailyFocus = getPersonalDailyFocus(sprintBody, today, selectedSprint.path);
   const focus = await getPersonalFocusIdea();
   const activeKrCounts = activityCounts[sprintMeta.activeKrActivity || activeKr?.activity] || { sprintCount: 0, weekCount: 0 };
   const activeProgress = getPersonalKrProgress(activeKr || {
@@ -4203,6 +4307,7 @@ async function getPersonalSprint(view = "") {
       title: okrMeta.title || "Personal OKRs",
       quarter: okrMeta.quarter || sprintMeta.quarter || "",
       status: okrMeta.status || "",
+      identity,
       objectives: groupPersonalOkrObjectives({
         keyResults: okrMeta.keyResults,
         activeKr: sprintMeta.activeKr,
@@ -4211,6 +4316,7 @@ async function getPersonalSprint(view = "") {
         sprintEnd: sprintMeta.sprintEnd
       })
     },
+    dailyFocus,
     focus
   };
 }
@@ -4229,6 +4335,23 @@ async function updatePersonalSprintCheckbox(body = {}) {
   }
   const nextFrontmatter = updateWeeklyCheckboxesFrontmatter(frontmatter, week, done);
   await fs.writeFile(filePath, `---\n${nextFrontmatter.trimEnd()}\n---\n${markdownBody}`, "utf8");
+  return await getPersonalSprint(selectedSprint.view);
+}
+
+async function updatePersonalSprintDailyFocus(body = {}) {
+  const text = String(body?.text || "").trim();
+  if (text.length > 600) throw httpError(400, "Daily focus must be 600 characters or less.");
+  const selectedSprint = await resolvePersonalSprintStatePath(body?.view || "");
+  const filePath = resolveVaultRelativePath(selectedSprint.path);
+  const markdown = await fs.readFile(filePath, "utf8");
+  const { frontmatter, body: markdownBody } = splitFrontmatter(markdown);
+  const today = formatDate(new Date());
+  const nextBody = updateDailyFocusMarkdown(markdownBody, {
+    date: today,
+    text,
+    source: body?.source || "webapp"
+  });
+  await fs.writeFile(filePath, `---\n${frontmatter.trimEnd()}\n---\n${nextBody}`, "utf8");
   return await getPersonalSprint(selectedSprint.view);
 }
 
@@ -4397,6 +4520,8 @@ function parseOkrFrontmatter(frontmatter) {
   return {
     title: scalar.title || "",
     quarter: scalar.quarter || "",
+    quarterStart: normalizeIsoDate(scalar["quarter-start"]),
+    quarterEnd: normalizeIsoDate(scalar["quarter-end"]),
     status: scalar.status || "",
     keyResults: parseYamlObjectArray(frontmatter, "key-results").map((item) => ({
       id: item.id || "",
@@ -4405,14 +4530,32 @@ function parseOkrFrontmatter(frontmatter) {
       description: item.description || "",
       type: item.type || "",
       target: item.target ? Number(item.target) : null,
+      weeklyTarget: item["weekly-target"] ? Number(item["weekly-target"]) : null,
       unit: item.unit || "",
       activity: item.activity || "",
+      habit: parseYamlBoolean(item.habit),
+      cadence: item.cadence || "",
       domain: item.domain || "",
       status: item.status || "",
       score: item.score || "",
       due: normalizeIsoDate(item.due),
       nextDue: normalizeIsoDate(item["next-due"])
     })).filter((item) => item.id)
+  };
+}
+
+function extractOkrIdentity(markdownBody) {
+  const section = extractMarkdownHeadingSection(markdownBody, "Identity", 1);
+  const text = section
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^>\s*/, ""))
+    .join("\n")
+    .trim();
+  return {
+    available: Boolean(text),
+    text
   };
 }
 
@@ -4471,6 +4614,100 @@ function updateWeeklyCheckboxesFrontmatter(frontmatter, week, done) {
   return lines.join("\n");
 }
 
+function getPersonalDailyFocus(markdownBody, date = formatDate(new Date()), sprintPath = "") {
+  const section = extractMarkdownSection(markdownBody, "Daily Focus");
+  const entries = section
+    .split(/\r?\n/)
+    .map(parseDailyFocusLine)
+    .filter(Boolean);
+  let todayEntry = null;
+  for (const entry of entries) {
+    if (entry.date === date) todayEntry = entry;
+  }
+  return {
+    path: sprintPath,
+    date,
+    text: todayEntry?.text || "",
+    source: todayEntry?.source || "",
+    available: Boolean(todayEntry?.text),
+    sectionExists: Boolean(section.trim())
+  };
+}
+
+function parseDailyFocusLine(line) {
+  const clean = String(line || "").trim();
+  if (!clean.startsWith("-")) return null;
+  const date = normalizeIsoDate(clean.match(/\[date::\s*([^\]]+)]/i)?.[1]);
+  const focus = clean.match(/\[focus::\s*([^\]]+)]/i)?.[1]?.trim() || "";
+  const source = clean.match(/\[source::\s*([^\]]+)]/i)?.[1]?.trim() || "";
+  if (date && focus) return { date, text: focus, source };
+
+  const fallback = clean.match(/^-\s*(\d{4}-\d{2}-\d{2})\s*(?::|-|\u2014)\s*(.+)$/);
+  if (!fallback) return null;
+  return {
+    date: normalizeIsoDate(fallback[1]),
+    text: stripMarkdown(fallback[2]),
+    source: "vault"
+  };
+}
+
+function updateDailyFocusMarkdown(markdownBody, { date, text, source = "webapp" } = {}) {
+  const normalizedDate = normalizeIsoDate(date);
+  if (!normalizedDate) throw httpError(400, "Daily focus date is required.");
+  const safeText = sanitizeInlineFieldValue(text);
+  const safeSource = sanitizeInlineFieldValue(source || "webapp");
+  const nextLine = `- [date:: ${normalizedDate}] [focus:: ${safeText}] [source:: ${safeSource}]`;
+  const original = String(markdownBody || "");
+  const lines = original.replace(/\s*$/, "\n").split(/\r?\n/);
+  const start = lines.findIndex((line) => {
+    const match = line.match(/^##\s+(.+)$/);
+    return match && stripMarkdown(match[1]).toLowerCase() === "daily focus";
+  });
+
+  if (start < 0) {
+    if (!safeText) return original;
+    return `${original.trimEnd()}\n\n## Daily Focus\n\n${nextLine}\n`;
+  }
+
+  const end = lines.findIndex((line, index) => index > start && /^##\s+/.test(line));
+  const sectionEnd = end < 0 ? lines.length : end;
+  let changed = false;
+  const nextLines = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (index <= start || index >= sectionEnd) {
+      nextLines.push(lines[index]);
+      continue;
+    }
+    const parsed = parseDailyFocusLine(lines[index]);
+    if (parsed?.date !== normalizedDate) {
+      nextLines.push(lines[index]);
+      continue;
+    }
+    if (changed || !safeText) {
+      changed = true;
+      continue;
+    }
+    nextLines.push(nextLine);
+    changed = true;
+  }
+
+  if (safeText && !changed) {
+    let insertAt = start + 1;
+    while (insertAt < sectionEnd && nextLines[insertAt]?.trim() === "") insertAt += 1;
+    nextLines.splice(insertAt, 0, nextLine);
+  }
+
+  return `${nextLines.join("\n").trimEnd()}\n`;
+}
+
+function sanitizeInlineFieldValue(value) {
+  return String(value || "")
+    .replace(/\r?\n/g, " ")
+    .replaceAll("]", ")")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function getPersonalFocusIdea() {
   const ledgerPath = PERSONAL_IDEA_LEDGER_PATH;
   const markdown = await readFileIfExists(resolveVaultRelativePath(ledgerPath));
@@ -4486,8 +4723,8 @@ async function getPersonalFocusIdea() {
   }
 
   const activeSection = extractMarkdownSection(markdown, "Active (1 slot only)");
-  const rows = parseMarkdownTableRows(activeSection);
-  const row = rows[0] || null;
+  const table = parseMarkdownTable(activeSection);
+  const row = table.rows[0] || null;
   if (!row) {
     return {
       ledgerPath,
@@ -4499,18 +4736,35 @@ async function getPersonalFocusIdea() {
     };
   }
 
-  const ideaCell = row[0] || "";
+  const ideaIndex = getMarkdownTableColumnIndex(table.headers, ["idea"], 0);
+  const doneLooksLikeIndex = getMarkdownTableColumnIndex(table.headers, ["done looks like"], 1);
+  const startedIndex = getMarkdownTableColumnIndex(table.headers, ["started", "reviewing since"], 2);
+  const ideaCell = row[ideaIndex] || "";
   const link = ideaCell.match(/\[([^\]]+)]\(([^)]+)\)/);
   const title = stripMarkdown(link?.[1] || ideaCell);
+  if (isOpenIdeaSlot(title)) {
+    return {
+      ledgerPath,
+      title: "",
+      doneLooksLike: "",
+      started: "",
+      ideaPath: "",
+      available: false
+    };
+  }
   const ideaPath = link?.[2] ? await resolveIdeaLedgerLink(link[2]) : "";
   return {
     ledgerPath,
     title,
-    doneLooksLike: stripMarkdown(row[1] || ""),
-    started: stripMarkdown(row[2] || ""),
+    doneLooksLike: stripMarkdown(row[doneLooksLikeIndex] || ""),
+    started: stripMarkdown(row[startedIndex] || ""),
     ideaPath,
     available: Boolean(title)
   };
+}
+
+function isOpenIdeaSlot(value) {
+  return /^(slot open|open|none|n\/a|-)$/i.test(stripMarkdown(value));
 }
 
 function extractMarkdownSection(markdown, headingText) {
@@ -4524,14 +4778,42 @@ function extractMarkdownSection(markdown, headingText) {
   return lines.slice(start + 1, end < 0 ? lines.length : end).join("\n");
 }
 
+function extractMarkdownHeadingSection(markdown, headingText, level = 1) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const headingPattern = new RegExp(`^#{${level}}\\s+(.+)$`);
+  const start = lines.findIndex((line) => {
+    const match = line.match(headingPattern);
+    return match && stripMarkdown(match[1]).toLowerCase() === String(headingText || "").toLowerCase();
+  });
+  if (start < 0) return "";
+  const end = lines.findIndex((line, index) => {
+    if (index <= start) return false;
+    const match = line.match(/^(#{1,6})\s+/);
+    return match && match[1].length <= level;
+  });
+  return lines.slice(start + 1, end < 0 ? lines.length : end).join("\n");
+}
+
 function parseMarkdownTableRows(markdown) {
-  return String(markdown || "")
+  return parseMarkdownTable(markdown).rows;
+}
+
+function parseMarkdownTable(markdown) {
+  const rows = String(markdown || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.startsWith("|") && line.endsWith("|"))
     .filter((line) => !/^\|\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line))
     .map((line) => line.slice(1, -1).split("|").map((cell) => cell.trim()))
-    .filter((cells) => cells.length >= 2 && !/^idea$/i.test(cells[0]));
+    .filter((cells) => cells.length >= 2);
+  const headers = rows[0]?.map((cell) => stripMarkdown(cell).toLowerCase()) || [];
+  const dataRows = rows.filter((cells, index) => index !== 0 || !/^idea$/i.test(stripMarkdown(cells[0])));
+  return { headers, rows: dataRows };
+}
+
+function getMarkdownTableColumnIndex(headers = [], names = [], fallback = 0) {
+  const index = headers.findIndex((header) => names.some((name) => header === name));
+  return index >= 0 ? index : fallback;
 }
 
 async function resolveIdeaLedgerLink(link) {
@@ -4614,6 +4896,176 @@ function getPersonalKrProgress(kr = {}, counts = {}, { sprintStart = "", sprintE
     percent: getProgressPercent(current, target),
     label: target ? `${current}/${target} days logged` : `${current} log${current === 1 ? "" : "s"} this sprint`
   };
+}
+
+function isTrackedHabitKr(kr = {}) {
+  return Boolean(kr.activity && (kr.habit === true || kr.type === "habit"));
+}
+
+function getOkrQuarterRange(okrMeta = {}, sprintMeta = {}) {
+  if (okrMeta.quarterStart && okrMeta.quarterEnd) {
+    return { start: okrMeta.quarterStart, end: okrMeta.quarterEnd };
+  }
+  const inferred = inferQuarterRange(okrMeta.quarter || sprintMeta.quarter || "");
+  if (inferred.start && inferred.end) return inferred;
+  return {
+    start: sprintMeta.sprintStart || formatDate(new Date()),
+    end: sprintMeta.sprintEnd || formatDate(new Date())
+  };
+}
+
+function inferQuarterRange(quarter = "") {
+  const match = String(quarter || "").match(/^Q([1-4])-FY(\d{4})$/i);
+  if (!match) return { start: "", end: "" };
+  const q = Number(match[1]);
+  const fy = Number(match[2]);
+  const startYear = q === 4 ? fy : fy - 1;
+  const ranges = {
+    1: [`${fy - 1}-04-15`, `${fy - 1}-07-14`],
+    2: [`${fy - 1}-07-15`, `${fy - 1}-10-14`],
+    3: [`${fy - 1}-10-15`, `${fy}-01-14`],
+    4: [`${startYear}-01-15`, `${fy}-04-14`]
+  };
+  const [start, end] = ranges[q] || ["", ""];
+  return { start, end };
+}
+
+function getHabitWeeklyTarget(kr = {}) {
+  if (kr.weeklyTarget) return Number(kr.weeklyTarget);
+  if (kr.type === "frequency") return Number(kr.target || 0);
+  if (kr.cadence === "weekly") return Number(kr.target || 1);
+  return 7;
+}
+
+function getHabitStatus({ kr = {}, todayDone = false, weekCount = 0, weeklyTarget = 0 } = {}) {
+  const cadence = kr.cadence || (kr.type === "frequency" ? "weekly" : "daily");
+  if (cadence === "daily") return todayDone ? "current" : "attention";
+  if (weeklyTarget && weekCount >= weeklyTarget) return "current";
+  return "attention";
+}
+
+function formatHabitStatusLabel(status, { todayDone = false, weekCount = 0, weeklyTarget = 0 } = {}) {
+  if (status === "current") return "current";
+  if (!todayDone && weeklyTarget >= 7) return "missing today";
+  if (weeklyTarget) return `${weekCount}/${weeklyTarget} this week`;
+  return "needs log";
+}
+
+async function countHabitActivityDates({ activity, start, end }) {
+  const dates = new Set();
+  let totalLogs = 0;
+  if (!activity || !start || !end) return { dates: [], totalLogs };
+  for (const month of getMonthSlugsBetween(start, end)) {
+    const relativePath = `2.Areas/Personal/fleeting/${month}.md`;
+    let markdown = "";
+    try {
+      markdown = await fs.readFile(resolveVaultRelativePath(relativePath), "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      continue;
+    }
+    let currentDate = "";
+    for (const line of markdown.split(/\r?\n/)) {
+      const heading = line.match(/^##\s+(\d{4}-\d{2}-\d{2})\s*$/);
+      if (heading) {
+        currentDate = heading[1];
+        continue;
+      }
+      if (!currentDate || currentDate < start || currentDate > end) continue;
+      const pattern = new RegExp(`\\[activity::\\s*${escapeRegExp(activity)}\\s*]`, "i");
+      if (!pattern.test(line)) continue;
+      dates.add(currentDate);
+      totalLogs += 1;
+    }
+  }
+  return { dates: Array.from(dates).sort(), totalLogs };
+}
+
+function getActivityStreak(activityDates = [], today = formatDate(new Date())) {
+  const dates = new Set(activityDates);
+  let cursor = dates.has(today) ? today : addDaysToIsoDate(today, -1);
+  let streak = 0;
+  while (cursor && dates.has(cursor)) {
+    streak += 1;
+    cursor = addDaysToIsoDate(cursor, -1);
+  }
+  return streak;
+}
+
+function getHabitConsistencyPeriods({ activityDates = [], start = "", end = "", today = formatDate(new Date()), cadence = "daily", weeklyTarget = 1 } = {}) {
+  const dates = new Set(activityDates);
+  const rangeStart = normalizeIsoDate(start);
+  const rangeEnd = normalizeIsoDate(end);
+  if (!rangeStart || !rangeEnd) return { weeks: [], currentWeekDays: [] };
+
+  const currentWeekStart = getIsoWeekStart(today);
+  const visibleRangeEnd = rangeEnd < addDaysToIsoDate(currentWeekStart, 6) ? rangeEnd : addDaysToIsoDate(currentWeekStart, 6);
+  const weeks = [];
+  let weekStart = getIsoWeekStart(rangeStart);
+  while (weekStart && weekStart <= visibleRangeEnd) {
+    const weekEnd = addDaysToIsoDate(weekStart, 6);
+    const clippedStart = weekStart < rangeStart ? rangeStart : weekStart;
+    const clippedEnd = weekEnd > rangeEnd ? rangeEnd : weekEnd;
+    const weekDates = getIsoDateRange(clippedStart, clippedEnd);
+    const count = weekDates.filter((date) => dates.has(date)).length;
+    const target = Math.min(Number(weeklyTarget || 1), weekDates.length || Number(weeklyTarget || 1));
+    const current = weekStart === currentWeekStart;
+    weeks.push({
+      start: weekStart,
+      end: weekEnd,
+      count,
+      target,
+      current,
+      status: getHabitWeekStatus({ count, target, weekEnd, today, current })
+    });
+    weekStart = addDaysToIsoDate(weekStart, 7);
+  }
+
+  const currentWeek = weeks.find((week) => week.current) || null;
+  const currentWeekDays = cadence === "daily" && currentWeek
+    ? getIsoDateRange(currentWeek.start < rangeStart ? rangeStart : currentWeek.start, currentWeek.end > rangeEnd ? rangeEnd : currentWeek.end)
+      .map((date) => ({
+        date,
+        logged: dates.has(date),
+        future: date > today,
+        today: date === today,
+        status: dates.has(date) ? "done" : (date > today ? "future" : "missed")
+      }))
+    : [];
+
+  return {
+    weeks: cadence === "daily" ? weeks.filter((week) => !week.current) : weeks,
+    currentWeekDays
+  };
+}
+
+function getIsoDateRange(startIso, endIso) {
+  const dates = [];
+  let cursor = normalizeIsoDate(startIso);
+  const end = normalizeIsoDate(endIso);
+  while (cursor && end && cursor <= end) {
+    dates.push(cursor);
+    cursor = addDaysToIsoDate(cursor, 1);
+  }
+  return dates;
+}
+
+function getHabitWeekStatus({ count = 0, target = 1, weekEnd = "", today = formatDate(new Date()), current = false } = {}) {
+  if (count >= target) return "done";
+  if (count > 0) return "partial";
+  if (current || weekEnd >= today) return "pending";
+  return "missed";
+}
+
+function getWeeklyHabitStreak(weeks = []) {
+  let index = weeks.length - 1;
+  while (index >= 0 && weeks[index]?.current && weeks[index].status !== "done") index -= 1;
+  let streak = 0;
+  for (; index >= 0; index -= 1) {
+    if (weeks[index]?.status !== "done") break;
+    streak += 1;
+  }
+  return streak;
 }
 
 function getInclusiveIsoDateCount(startIso, endIso) {
@@ -4921,7 +5373,7 @@ async function getIndexedTaskById(taskId) {
 function resolveVaultMarkdownPath(relativePath) {
   const normalized = String(relativePath || "").replaceAll("\\", "/").replace(/^\/+/, "");
   if (!normalized.endsWith(".md")) throw httpError(400, "Only Markdown tasks can be edited.");
-  if (shouldSkipRelativeVaultPath(normalized)) throw httpError(400, "This task path is ignored by the index.");
+  if (shouldSkipRelativeVaultPath(normalized)) throw httpError(400, "This task path is ignored by Tasks.");
 
   const root = path.resolve(VAULT_PATH);
   const filePath = path.resolve(root, normalized);
@@ -5102,7 +5554,17 @@ function shouldSkipVaultPath(relativePath, entry) {
   if (entry.isDirectory() && isSkillDirectoryPrefix(relativePath)) return false;
   if (entry.isDirectory() && isPeopleDirectoryPrefix(relativePath)) return false;
   if (entry.isDirectory() && (SKIPPED_DIRS.has(entry.name) || entry.name.startsWith("."))) return true;
-  return shouldSkipRelativeVaultPath(relativePath);
+  return shouldSkipVaultPathForIndex(relativePath);
+}
+
+function shouldSkipVaultPathForIndex(relativePath) {
+  if (isSkillMarkdownPath(relativePath) || isPeopleMarkdownPath(relativePath)) {
+    return SENSITIVE_PATH_PATTERN.test(relativePath);
+  }
+  const segments = String(relativePath || "").split("/").filter(Boolean);
+  if (segments.some((segment) => SKIPPED_DIRS.has(segment) || segment.startsWith("."))) return true;
+  if (segments.some((segment) => SKIPPED_PATH_PARTS.has(segment.toLowerCase()))) return true;
+  return SENSITIVE_PATH_PATTERN.test(relativePath);
 }
 
 function shouldSkipRelativeVaultPath(relativePath) {

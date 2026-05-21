@@ -285,19 +285,17 @@
 
         <section class="tab-panel" data-tab-panel="dashboard" aria-label="Dashboard" hidden>
           <section class="workspace-view">
-            <div class="view-toolbar">
-              <p>System health and personal cadence.</p>
-              <div class="toolbar-actions">
-                <button class="secondary-button" id="index-run-button" type="button">Rebuild index</button>
-              </div>
-            </div>
-            <div class="index-grid" id="index-status">
-              <div class="empty-state">
-                <p class="empty-title">Checking index...</p>
-              </div>
-            </div>
-
             <div class="dashboard-grid">
+              <section class="dashboard-section dashboard-section-wide identity-section" id="dashboard-identity" hidden></section>
+              <section class="dashboard-section dashboard-section-wide">
+                <div class="section-heading-row">
+                  <h2>Habits</h2>
+                  <span>Quarter OKRs</span>
+                </div>
+                <div class="habit-dashboard" id="dashboard-habits">
+                  <p class="quiet-line">Loading habit state...</p>
+                </div>
+              </section>
               <section class="dashboard-section dashboard-section-wide">
                 <div class="section-heading-row">
                   <h2>Personal cadence</h2>
@@ -345,6 +343,17 @@
                 </div>
                 <div id="settings-details"></div>
               </details>
+              <section class="dashboard-section dashboard-section-wide index-section">
+                <div class="section-heading-row">
+                  <h2>Index and watcher</h2>
+                  <button class="secondary-button compact-button" id="index-run-button" type="button">Rebuild index</button>
+                </div>
+                <div class="index-grid" id="index-status">
+                  <div class="empty-state">
+                    <p class="empty-title">Checking index...</p>
+                  </div>
+                </div>
+              </section>
             </div>
           </section>
         </section>

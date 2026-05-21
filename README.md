@@ -53,6 +53,8 @@ For routine checks and recovery steps, use [docs/maintenance-checklist.md](docs/
 
 For repo/vault boundaries and backup hygiene, use [docs/repo-and-backup-hygiene.md](docs/repo-and-backup-hygiene.md).
 
+For quarter-level habit tracking in Dashboard, use [docs/okr-habit-format.md](docs/okr-habit-format.md).
+
 Quick local diagnosis:
 
 ```bash
@@ -135,14 +137,14 @@ Chat sessions are saved as Markdown under `CHAT_SESSIONS_DIR`, which defaults to
 
 ## Ignore Rules
 
-Task/search indexing can ignore vault files or folders without changing the vault.
+Task indexing can ignore vault files or folders without changing the vault. Ignored paths are still indexed as notes for chat, file lookup, and vault context.
 
 Use either:
 
 - `INDEX_IGNORE=4.Archive/,2.Areas/Career/private-notes/`
 - or copy `.second-brain-ignore.example` to `.second-brain-ignore` and add one vault-relative path per line.
 
-Simple `*` wildcards are supported. Ignored paths are excluded from search, task lists, dashboard counts, and watcher-triggered indexing.
+Simple `*` wildcards are supported. Ignored paths are excluded from task lists and task/dashboard counts only; chat and file search can still use the full vault.
 
 ## API
 
