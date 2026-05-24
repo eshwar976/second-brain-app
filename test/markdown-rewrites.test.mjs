@@ -531,10 +531,12 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
     assert.equal(gymHabit.streakUnit, "week");
     assert.equal(gymHabit.streak, 0);
     assert.ok(gymHabit.periods.weeks.some((week) => week.current));
+    assert.equal(gymHabit.periods.weeks.find((week) => week.current).status, "current-partial");
     assert.equal(ointmentHabit.quarterDays, 4);
     assert.equal(ointmentHabit.target, 2);
     assert.equal(ointmentHabit.streakUnit, "day");
     assert.ok(Array.isArray(ointmentHabit.periods.currentWeekDays));
+    assert.equal(ointmentHabit.periods.currentWeekDays.find((day) => day.today).status, "pending");
     assert.ok(ointmentHabit.periods.weeks.some((week) => week.status === "done"));
 
     await writeFile(path.join(vaultPath, "2.Areas", "Personal", "Ideas", "idea-ledger.md"), [

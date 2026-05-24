@@ -8,9 +8,10 @@ Last updated: 2026-05-21
 
 1. Phase 6: Packaging / Maintenance and MCP hardening
 2. Phase 5: AI Workflows polish
-3. Future MCP tools/security planning
-4. Optional polish from earlier phases
-5. Rename / branding pass, including possible rename to Flowise
+3. Future Hermes + LLM Wiki architecture
+4. Future MCP tools/security planning
+5. Optional polish from earlier phases
+6. Rename / branding pass, including possible rename to Flowise
 
 ## Phase 1: Stabilization
 
@@ -258,6 +259,20 @@ Security considerations:
 
 Reference plan:
 - `docs/mcp-future-plan.md`
+
+## Future Feature Enhancement: Hermes + LLM Wiki
+
+Status: Planned.
+
+Plan:
+- Evaluate Hermes as the future chat/workflow runtime before removing OpenCode.
+- Add an LLM Wiki as a derived compiled-knowledge layer inside the same vault.
+- Keep raw capture, sources, OKRs, sprints, habits, and tasks as source-of-truth.
+- Use Obsidian Web Clipper and other tools as raw source intake into `3.Resources/Sources`.
+- Use Hermes to ingest sources and maintain `3.Resources/llm-wiki`.
+
+Reference plan:
+- `docs/hermes-llm-wiki-plan.md`
 
 Flowise rename:
 - Recommended timing: Phase 6, after AI workflows are stable.

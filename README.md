@@ -55,6 +55,8 @@ For repo/vault boundaries and backup hygiene, use [docs/repo-and-backup-hygiene.
 
 For quarter-level habit tracking in Dashboard, use [docs/okr-habit-format.md](docs/okr-habit-format.md).
 
+For the planned Hermes runtime and LLM Wiki architecture, use [docs/hermes-llm-wiki-plan.md](docs/hermes-llm-wiki-plan.md).
+
 For MCP client setup, use [docs/mcp-client-setup.md](docs/mcp-client-setup.md).
 
 For the future MCP architecture and security model, use [docs/mcp-future-plan.md](docs/mcp-future-plan.md).

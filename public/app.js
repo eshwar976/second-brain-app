@@ -32,6 +32,8 @@ const CHAT_CONTEXT_SUGGEST_DEBOUNCE_MS = 420;
 const CHAT_AUTO_RESUME_MS = 30 * 60 * 1000;
 const RECENT_CONTEXT_LIMIT = 6;
 const PINNED_CONTEXT_LIMIT = 8;
+const PULL_REFRESH_TRIGGER_PX = 72;
+const PULL_REFRESH_MAX_PX = 104;
 const THEME_CHOICES = new Set(["system", "light", "dark"]);
 const CHAT_THINKING_CHOICES = new Set(["disabled", "enabled"]);
 const systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
@@ -99,6 +101,7 @@ const state = {
   chatSummarySaving: false,
   chatTodosExtracting: false,
   chatNoteCreating: false,
+  habitPopover: null,
   pendingTriageTask: null,
   pendingEdit: null,
   todoSheetMode: "capture",
@@ -119,6 +122,17 @@ const state = {
     recognition: null,
     baseText: "",
     finalText: ""
+  },
+  pullRefresh: {
+    eligible: false,
+    active: false,
+    refreshing: false,
+    startX: 0,
+    startY: 0,
+    distance: 0,
+    tab: "",
+    scrollEl: null,
+    indicator: null
   }
 };
 
@@ -232,6 +246,7 @@ async function init() {
   initDeepWork();
   initChatContextMemory();
   wireInteractions();
+  initPullToRefresh();
   initSpeechRecognition();
   registerServiceWorker();
   await loadConfig();
@@ -735,6 +750,10 @@ function wireInteractions() {
     state.dashboardShowAllCadence = !state.dashboardShowAllCadence;
     renderDashboard();
   });
+  dashboardHabits?.addEventListener("click", handleHabitDotClick);
+  document.addEventListener("click", handleHabitPopoverDismiss);
+  window.addEventListener("resize", closeHabitPopover, { passive: true });
+  window.visualViewport?.addEventListener("resize", closeHabitPopover, { passive: true });
 
   searchForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -774,6 +793,189 @@ function scheduleChatScrollToBottom() {
   window.requestAnimationFrame(() => {
     chatTimeline.scrollTop = chatTimeline.scrollHeight;
   });
+}
+
+function initPullToRefresh() {
+  if (!captureScreen) return;
+  const indicator = document.createElement("div");
+  indicator.className = "pull-refresh-indicator";
+  indicator.setAttribute("aria-live", "polite");
+  indicator.innerHTML = `<span class="pull-refresh-spinner" aria-hidden="true"></span><strong>Pull to refresh</strong>`;
+  document.body.appendChild(indicator);
+  state.pullRefresh.indicator = indicator;
+
+  captureScreen.addEventListener("touchstart", handlePullRefreshStart, { passive: true });
+  captureScreen.addEventListener("touchmove", handlePullRefreshMove, { passive: false });
+  captureScreen.addEventListener("touchend", handlePullRefreshEnd, { passive: true });
+  captureScreen.addEventListener("touchcancel", cancelPullRefresh, { passive: true });
+}
+
+function handlePullRefreshStart(event) {
+  if (state.pullRefresh.refreshing || event.touches.length !== 1) return;
+  if (isTextEditingTarget(event.target) || isTextInputFocused()) return;
+  const tab = getActiveTabName();
+  const scrollEl = getPullRefreshScrollElement(tab);
+  if (!scrollEl || scrollEl.scrollTop > 1) return;
+  const touch = event.touches[0];
+  Object.assign(state.pullRefresh, {
+    eligible: true,
+    active: false,
+    startX: touch.clientX,
+    startY: touch.clientY,
+    distance: 0,
+    tab,
+    scrollEl
+  });
+}
+
+function handlePullRefreshMove(event) {
+  const pull = state.pullRefresh;
+  if (!pull.eligible || pull.refreshing || event.touches.length !== 1) return;
+  const touch = event.touches[0];
+  const deltaY = touch.clientY - pull.startY;
+  const deltaX = Math.abs(touch.clientX - pull.startX);
+  if (deltaY <= 0) {
+    cancelPullRefresh();
+    return;
+  }
+  if (deltaX > deltaY * 1.15) return;
+  if (pull.scrollEl?.scrollTop > 1) {
+    cancelPullRefresh();
+    return;
+  }
+
+  const distance = Math.min(PULL_REFRESH_MAX_PX, Math.round(deltaY * 0.52));
+  if (distance < 8) return;
+  event.preventDefault();
+  pull.active = true;
+  pull.distance = distance;
+  renderPullRefreshIndicator(distance, distance >= PULL_REFRESH_TRIGGER_PX ? "Release to refresh" : "Pull to refresh");
+}
+
+function handlePullRefreshEnd() {
+  const pull = state.pullRefresh;
+  if (!pull.active) {
+    cancelPullRefresh();
+    return;
+  }
+  if (pull.distance >= PULL_REFRESH_TRIGGER_PX) {
+    refreshPulledTab(pull.tab);
+    return;
+  }
+  cancelPullRefresh();
+}
+
+async function refreshPulledTab(tab) {
+  const pull = state.pullRefresh;
+  pull.refreshing = true;
+  renderPullRefreshIndicator(PULL_REFRESH_TRIGGER_PX, "Refreshing...");
+  pull.indicator?.classList.add("is-refreshing");
+  try {
+    await refreshTabData(tab);
+    showToast(`${getTabLabel(tab)} refreshed.`);
+  } catch (error) {
+    showToast(error.message || "Refresh failed.", { duration: 3200 });
+  } finally {
+    window.setTimeout(cancelPullRefresh, 260);
+  }
+}
+
+function cancelPullRefresh() {
+  const indicator = state.pullRefresh.indicator;
+  indicator?.classList.remove("is-visible", "is-ready", "is-refreshing");
+  if (indicator) {
+    indicator.style.transform = "";
+    const label = indicator.querySelector("strong");
+    if (label) label.textContent = "Pull to refresh";
+  }
+  Object.assign(state.pullRefresh, {
+    eligible: false,
+    active: false,
+    refreshing: false,
+    startX: 0,
+    startY: 0,
+    distance: 0,
+    tab: "",
+    scrollEl: null
+  });
+}
+
+function renderPullRefreshIndicator(distance, label) {
+  const indicator = state.pullRefresh.indicator;
+  if (!indicator) return;
+  indicator.classList.add("is-visible");
+  indicator.classList.toggle("is-ready", distance >= PULL_REFRESH_TRIGGER_PX);
+  indicator.style.transform = `translate(-50%, ${Math.round(Math.min(distance, PULL_REFRESH_MAX_PX))}px)`;
+  const text = indicator.querySelector("strong");
+  if (text) text.textContent = label;
+}
+
+async function refreshTabData(tab) {
+  switch (tab) {
+    case "capture":
+      await loadCaptures();
+      return;
+    case "tasks":
+      await loadTasks();
+      return;
+    case "sprint":
+      await loadPersonalSprint();
+      return;
+    case "dashboard":
+      await loadDashboard();
+      return;
+    case "chat":
+      await refreshChatTabData();
+      return;
+    default:
+      await loadCaptures();
+  }
+}
+
+async function refreshChatTabData() {
+  await loadChatSessionsCache();
+  const sessionPath = state.chatSession?.path || "";
+  if (!sessionPath) {
+    renderChatSessionState();
+    return;
+  }
+  const params = new URLSearchParams({ path: sessionPath });
+  const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
+  state.chatSession = data.session || state.chatSession;
+  upsertChatSession(state.chatSession);
+  state.chatMessages = (data.messages || []).filter((message) => message.content);
+  renderChat();
+  renderChatSessionState();
+}
+
+function getPullRefreshScrollElement(tab) {
+  if (tab === "capture") return timeline;
+  if (tab === "chat") return chatTimeline;
+  const panel = document.querySelector(`[data-tab-panel="${cssEscape(tab)}"].is-active`);
+  return panel?.querySelector(".workspace-view") || null;
+}
+
+function getActiveTabName() {
+  return document.querySelector("[data-tab-panel].is-active")?.dataset.tabPanel || "capture";
+}
+
+function getTabLabel(tab) {
+  return {
+    capture: "Capture",
+    chat: "Chat",
+    tasks: "Tasks",
+    sprint: "Sprint",
+    dashboard: "Dashboard"
+  }[tab] || "App";
+}
+
+function isTextInputFocused() {
+  const active = document.activeElement;
+  return Boolean(active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName));
+}
+
+function isTextEditingTarget(target) {
+  return Boolean(target?.closest?.("input, textarea, select, button, a, [contenteditable='true'], .composer, .todo-sheet, .session-drawer"));
 }
 
 function setComposerFocus(isFocused) {
@@ -4269,25 +4471,168 @@ function renderHabitConsistency(item) {
 }
 
 function renderHabitWeekDot(week) {
-  const label = `${formatShortDate(week.start)}: ${numberFormat(week.count || 0)}/${numberFormat(week.target || 0)}`;
+  const label = formatHabitWeekSummary(week);
   return `
-    <span
+    <button
+      type="button"
       class="habit-dot habit-dot-week habit-dot-${escapeHtml(week.status || "pending")} ${week.current ? "is-current" : ""}"
+      data-habit-dot="week"
+      data-start="${escapeHtml(week.start || "")}"
+      data-end="${escapeHtml(week.end || "")}"
+      data-count="${escapeHtml(String(week.count || 0))}"
+      data-target="${escapeHtml(String(week.target || 0))}"
+      data-status="${escapeHtml(week.status || "pending")}"
+      data-current="${week.current ? "true" : "false"}"
+      data-logged-days="${escapeHtml((week.loggedDays || []).join(","))}"
       title="${escapeHtml(label)}"
       aria-label="${escapeHtml(label)}"
-    ></span>
+    ></button>
   `;
 }
 
 function renderHabitDayDot(day) {
-  const label = `${formatShortDate(day.date)}: ${day.logged ? "logged" : (day.future ? "future" : "missed")}`;
+  const label = formatHabitDaySummary(day);
   return `
-    <span
+    <button
+      type="button"
       class="habit-dot habit-dot-day habit-dot-${escapeHtml(day.status || "future")} ${day.today ? "is-today" : ""}"
+      data-habit-dot="day"
+      data-date="${escapeHtml(day.date || "")}"
+      data-logged="${day.logged ? "true" : "false"}"
+      data-future="${day.future ? "true" : "false"}"
+      data-today="${day.today ? "true" : "false"}"
+      data-status="${escapeHtml(day.status || "future")}"
       title="${escapeHtml(label)}"
       aria-label="${escapeHtml(label)}"
-    ></span>
+    ></button>
   `;
+}
+
+function formatHabitWeekSummary(week = {}) {
+  const count = Number(week.count || 0);
+  const target = Number(week.target || 0);
+  const title = week.current ? "This week" : `Week of ${formatShortDate(week.start)}`;
+  const suffix = week.current
+    ? (target >= 7 ? "days so far" : "so far")
+    : (target >= 7 ? "days logged" : "logged");
+  return `${title} - ${numberFormat(count)}/${numberFormat(target)} ${suffix}`;
+}
+
+function formatHabitDaySummary(day = {}) {
+  if (day.today && !day.logged) return "Today - not logged yet";
+  if (day.today && day.logged) return "Today - logged";
+  const openLabel = day.future ? "future" : "missed";
+  return `${formatShortDate(day.date)} - ${day.logged ? "logged" : openLabel}`;
+}
+
+function handleHabitDotClick(event) {
+  const dot = event.target.closest("[data-habit-dot]");
+  if (!dot) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const detail = dot.dataset.habitDot === "week"
+    ? getHabitWeekPopoverDetail(dot.dataset)
+    : getHabitDayPopoverDetail(dot.dataset);
+  showHabitPopover(dot, detail);
+}
+
+function handleHabitPopoverDismiss(event) {
+  if (!state.habitPopover) return;
+  if (event.target.closest(".habit-period-popover") || event.target.closest("[data-habit-dot]")) return;
+  closeHabitPopover();
+}
+
+function getHabitWeekPopoverDetail(data = {}) {
+  const count = Number(data.count || 0);
+  const target = Number(data.target || 0);
+  const current = data.current === "true";
+  const status = formatHabitPeriodStatus(data.status || "pending", current);
+  const loggedDays = String(data.loggedDays || "").split(",").filter(Boolean);
+  const title = current ? "This week" : `Week of ${formatShortDate(data.start)}`;
+  const progress = `${numberFormat(count)}/${numberFormat(target)} ${current ? (target >= 7 ? "days so far" : "so far") : (target >= 7 ? "days logged" : "logged")}`;
+  return {
+    title,
+    summary: `${title} - ${progress}`,
+    status,
+    meta: loggedDays.length ? `Logged ${formatHabitLoggedDays(loggedDays)}` : (current ? "Still open" : "No logs found")
+  };
+}
+
+function getHabitDayPopoverDetail(data = {}) {
+  const today = data.today === "true";
+  const logged = data.logged === "true";
+  const future = data.future === "true";
+  const title = today ? "Today" : formatShortDate(data.date);
+  const status = logged ? "Logged" : (today ? "Not logged yet" : (future ? "Future" : "Missed"));
+  return {
+    title,
+    summary: `${title} - ${status.toLowerCase()}`,
+    status,
+    meta: data.date ? formatLongDate(data.date) : ""
+  };
+}
+
+function showHabitPopover(anchor, detail = {}) {
+  closeHabitPopover();
+  const popover = document.createElement("div");
+  popover.className = "habit-period-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", detail.title || "Habit detail");
+  popover.innerHTML = `
+    <strong>${escapeHtml(detail.summary || detail.title || "Habit detail")}</strong>
+    <span>${escapeHtml(detail.status || "")}</span>
+    ${detail.meta ? `<p>${escapeHtml(detail.meta)}</p>` : ""}
+  `;
+  document.body.appendChild(popover);
+  state.habitPopover = popover;
+
+  const rect = anchor.getBoundingClientRect();
+  const popoverRect = popover.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(12, rect.left + rect.width / 2 - popoverRect.width / 2),
+    window.innerWidth - popoverRect.width - 12
+  );
+  const top = rect.top > popoverRect.height + 16
+    ? rect.top - popoverRect.height - 10
+    : rect.bottom + 10;
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(Math.max(12, top))}px`;
+}
+
+function closeHabitPopover() {
+  state.habitPopover?.remove();
+  state.habitPopover = null;
+}
+
+function formatHabitPeriodStatus(status, current = false) {
+  if (status === "done") return "Complete";
+  if (status === "current-partial") return "In progress";
+  if (status === "partial") return "Partial";
+  if (status === "missed") return "Missed";
+  if (current || status === "pending") return "Still open";
+  return status || "";
+}
+
+function formatHabitLoggedDays(days = []) {
+  return days.map((date) => formatWeekdayShort(date)).join(", ");
+}
+
+function formatWeekdayShort(value) {
+  const date = parseIsoDate(value);
+  if (!date) return value;
+  return date.toLocaleDateString(undefined, { weekday: "short" });
+}
+
+function formatLongDate(value) {
+  const date = parseIsoDate(value);
+  if (!date) return value;
+  return date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+}
+
+function parseIsoDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return null;
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function formatHabitDetail(item) {

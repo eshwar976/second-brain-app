@@ -5175,6 +5175,14 @@ function getHabitConsistencyPeriods({ activityDates = [], start = "", end = "", 
       count,
       target,
       current,
+      loggedDays: weekDates.filter((date) => dates.has(date)),
+      days: weekDates.map((date) => ({
+        date,
+        logged: dates.has(date),
+        future: date > today,
+        today: date === today,
+        status: dates.has(date) ? "done" : (date >= today ? "pending" : "missed")
+      })),
       status: getHabitWeekStatus({ count, target, weekEnd, today, current })
     });
     weekStart = addDaysToIsoDate(weekStart, 7);
@@ -5188,7 +5196,7 @@ function getHabitConsistencyPeriods({ activityDates = [], start = "", end = "", 
         logged: dates.has(date),
         future: date > today,
         today: date === today,
-        status: dates.has(date) ? "done" : (date > today ? "future" : "missed")
+        status: dates.has(date) ? "done" : (date >= today ? "pending" : "missed")
       }))
     : [];
 
@@ -5211,8 +5219,8 @@ function getIsoDateRange(startIso, endIso) {
 
 function getHabitWeekStatus({ count = 0, target = 1, weekEnd = "", today = formatDate(new Date()), current = false } = {}) {
   if (count >= target) return "done";
+  if (current || weekEnd >= today) return count > 0 ? "current-partial" : "pending";
   if (count > 0) return "partial";
-  if (current || weekEnd >= today) return "pending";
   return "missed";
 }
 

@@ -193,6 +193,65 @@ input {
   display: none;
 }
 
+.pull-refresh-indicator {
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 2px);
+  left: 50%;
+  z-index: 2400;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  border: 1px solid rgba(221, 214, 204, 0.9);
+  border-radius: 999px;
+  background: rgba(255, 252, 247, 0.96);
+  color: var(--muted);
+  box-shadow: 0 16px 34px rgba(35, 31, 26, 0.16);
+  opacity: 0;
+  pointer-events: none;
+  padding: 8px 13px;
+  transform: translate(-50%, -54px);
+  transition: opacity 0.14s ease, transform 0.16s ease, color 0.14s ease, border-color 0.14s ease;
+}
+
+.pull-refresh-indicator.is-visible {
+  opacity: 1;
+}
+
+.pull-refresh-indicator.is-ready,
+.pull-refresh-indicator.is-refreshing {
+  border-color: rgba(95, 127, 101, 0.36);
+  color: var(--sage);
+}
+
+.pull-refresh-indicator strong {
+  font-size: 0.78rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.pull-refresh-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(129, 121, 108, 0.24);
+  border-top-color: currentColor;
+  border-radius: 999px;
+}
+
+.pull-refresh-indicator.is-refreshing .pull-refresh-spinner {
+  animation: pull-refresh-spin 0.72s linear infinite;
+}
+
+@keyframes pull-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+:root[data-theme="dark"] .pull-refresh-indicator {
+  border-color: rgba(59, 57, 51, 0.95);
+  background: rgba(24, 25, 22, 0.97);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.36);
+}
+
 .top-bar {
   position: relative;
   display: flex;
@@ -2854,9 +2913,13 @@ h1 {
 .habit-dot {
   display: inline-block;
   flex: 0 0 auto;
+  appearance: none;
+  border: 0;
+  padding: 0;
   border-radius: 999px;
   background: rgba(129, 121, 108, 0.26);
   box-shadow: inset 0 0 0 1px rgba(89, 83, 73, 0.12);
+  cursor: pointer;
 }
 
 .habit-dot-week {
@@ -2875,9 +2938,22 @@ h1 {
 }
 
 .habit-dot-partial,
-.habit-dot-pending {
+.habit-dot-pending,
+.habit-dot-current-partial {
   background: rgba(214, 169, 87, 0.88);
   box-shadow: 0 0 0 2px rgba(214, 169, 87, 0.12);
+}
+
+.habit-dot-week.habit-dot-current-partial {
+  background:
+    linear-gradient(90deg, rgba(129, 121, 108, 0.42) 0 50%, rgba(129, 121, 108, 0.14) 50% 100%);
+  box-shadow: inset 0 0 0 1px rgba(129, 121, 108, 0.3);
+}
+
+.habit-dot-week.habit-dot-pending,
+.habit-dot-day.habit-dot-pending {
+  background: rgba(129, 121, 108, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(129, 121, 108, 0.28);
 }
 
 .habit-dot-missed {
@@ -2896,6 +2972,45 @@ h1 {
   outline-offset: 2px;
 }
 
+.habit-dot:focus-visible {
+  outline: 2px solid rgba(36, 116, 122, 0.5);
+  outline-offset: 3px;
+}
+
+.habit-period-popover {
+  position: fixed;
+  z-index: 2200;
+  display: grid;
+  gap: 5px;
+  width: min(260px, calc(100vw - 24px));
+  border: 1px solid rgba(221, 214, 204, 0.88);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: rgba(255, 252, 246, 0.98);
+  box-shadow: 0 18px 42px rgba(35, 31, 26, 0.16);
+}
+
+.habit-period-popover strong {
+  color: var(--text);
+  font-size: 0.92rem;
+  line-height: 1.25;
+}
+
+.habit-period-popover span {
+  color: var(--sage);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.habit-period-popover p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
 :root[data-theme="dark"] .habit-current-week {
   border-left-color: rgba(217, 210, 196, 0.16);
 }
@@ -2911,9 +3026,22 @@ h1 {
 }
 
 :root[data-theme="dark"] .habit-dot-partial,
-:root[data-theme="dark"] .habit-dot-pending {
+:root[data-theme="dark"] .habit-dot-pending,
+:root[data-theme="dark"] .habit-dot-current-partial {
   background: rgba(240, 195, 111, 0.9);
   box-shadow: 0 0 0 2px rgba(240, 195, 111, 0.12);
+}
+
+:root[data-theme="dark"] .habit-dot-week.habit-dot-current-partial {
+  background:
+    linear-gradient(90deg, rgba(217, 210, 196, 0.36) 0 50%, rgba(217, 210, 196, 0.11) 50% 100%);
+  box-shadow: inset 0 0 0 1px rgba(217, 210, 196, 0.18);
+}
+
+:root[data-theme="dark"] .habit-dot-week.habit-dot-pending,
+:root[data-theme="dark"] .habit-dot-day.habit-dot-pending {
+  background: rgba(217, 210, 196, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(217, 210, 196, 0.18);
 }
 
 :root[data-theme="dark"] .habit-dot-missed {
@@ -2924,6 +3052,16 @@ h1 {
 :root[data-theme="dark"] .habit-dot-future {
   background: rgba(217, 210, 196, 0.14);
   box-shadow: inset 0 0 0 1px rgba(217, 210, 196, 0.14);
+}
+
+:root[data-theme="dark"] .habit-period-popover {
+  border-color: rgba(59, 57, 51, 0.95);
+  background: rgba(24, 25, 22, 0.98);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.38);
+}
+
+:root[data-theme="dark"] .habit-period-popover span {
+  color: var(--sage);
 }
 
 .deep-work-summary {
