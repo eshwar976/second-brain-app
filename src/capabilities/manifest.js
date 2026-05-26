@@ -213,7 +213,7 @@ export const SECOND_BRAIN_CAPABILITIES = [
     name: "chat.send_message",
     phase: CAPABILITY_PHASE.deferred,
     risk: CAPABILITY_RISK.read,
-    description: "Send a message to the OpenCode-backed chat runtime. Deferred until operational tools are stable.",
+    description: "Send a message to the Hermes-backed chat runtime. Deferred until operational tools are stable.",
     http: { method: "POST", path: "/api/chat" },
     input: {
       type: "object",

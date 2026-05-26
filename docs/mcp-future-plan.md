@@ -159,7 +159,7 @@ Anything that mutates existing notes beyond daily focus should wait until the au
 - Do not expose arbitrary file reads.
 - Do not expose arbitrary file writes.
 - Do not expose shell execution.
-- Do not expose raw OpenCode control unless the caller is trusted.
+- Do not expose raw agent control unless the caller is trusted.
 - Require authentication for all network MCP calls.
 - Prefer `Authorization: Bearer <MCP_TOKEN>` for MCP clients, while allowing the current `X-Second-Brain-Secret` app-token header for local compatibility.
 - Support client-specific allowlists, for example:
@@ -186,15 +186,15 @@ The voice assistant should use a small set of natural, safe operations:
 
 The speaker should not directly browse arbitrary vault files by default. It should ask through high-level tools that return concise, spoken-friendly answers.
 
-## Relationship To OpenCode
+## Relationship To Hermes
 
-OpenCode should remain the chat runtime for now. The future MCP server should not replace OpenCode by default.
+Hermes is the chat runtime. The future MCP server should expose narrow Second Brain tools and, where useful, call the webapp's existing chat wrapper instead of exposing Hermes directly.
 
 Possible future modes:
 
-- MCP exposes operational tools; OpenCode remains chat brain.
-- OpenCode can call Second Brain MCP tools if configured as a client.
-- A future assistant gateway can call both OpenCode and Second Brain MCP.
+- MCP exposes operational tools; Hermes remains chat brain.
+- Hermes or another assistant can call Second Brain MCP tools if configured as a client.
+- A future assistant gateway can call Hermes plus Second Brain MCP tools.
 
 ## Non-Goals For The First MCP Pass
 
@@ -226,7 +226,7 @@ The target shape remains:
 ```text
 HTTP routes
         \
-         executeCapability -> service modules -> vault/sqlite/opencode
+         executeCapability -> service modules -> vault/sqlite/hermes
         /
 MCP tools
 ```
@@ -240,4 +240,4 @@ Keep transport/auth at the edges. Keep service modules trusted and transport-agn
 - Should the first implementation accept only `Authorization: Bearer <MCP_TOKEN>`, or also accept `X-Second-Brain-Secret` for local compatibility?
 - Which write tools need confirmation?
 - Where should audit logs live: `.data/audit`, a SQLite table, or both?
-- Should chat tools use OpenCode sessions directly or the webapp's `/api/chat` wrapper?
+- Should chat tools use Hermes directly or the webapp's `/api/chat` wrapper?

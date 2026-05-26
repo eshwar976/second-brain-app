@@ -21,12 +21,25 @@ await loadDotEnv(path.join(__dirname, ".env"));
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || "3030");
 const VAULT_PATH = process.env.VAULT_PATH;
+const IS_ICLOUD_VAULT = /\/(?:Mobile Documents|CloudDocs)\//.test(String(VAULT_PATH || ""));
 const PUBLIC_DIR = path.join(__dirname, "public");
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, ".data");
 const DB_PATH = path.join(DATA_DIR, "index.sqlite");
 const SQLITE_BIN = process.env.SQLITE_BIN || "/usr/bin/sqlite3";
 const WATCH_DEBOUNCE_MS = Number(process.env.WATCH_DEBOUNCE_MS || "1200");
+const ICLOUD_WATCH_DEBOUNCE_MS = Number(process.env.ICLOUD_WATCH_DEBOUNCE_MS || "15000");
+const ICLOUD_STARTUP_INDEX_DELAY_MS = Number(process.env.ICLOUD_STARTUP_INDEX_DELAY_MS || "30000");
+const ICLOUD_READ_RETRY_COUNT = Number(process.env.ICLOUD_READ_RETRY_COUNT || "3");
+const MAX_INDEX_READ_ERROR_LOGS = Number(process.env.MAX_INDEX_READ_ERROR_LOGS || "10");
 const AUTO_INDEX_ON_START = process.env.AUTO_INDEX_ON_START !== "false";
+const VAULT_WATCH_ENABLED = process.env.VAULT_WATCH_ENABLED
+  ? process.env.VAULT_WATCH_ENABLED !== "false"
+  : !IS_ICLOUD_VAULT;
+const NIGHTLY_INDEX_ENABLED = process.env.NIGHTLY_INDEX_ENABLED
+  ? process.env.NIGHTLY_INDEX_ENABLED !== "false"
+  : IS_ICLOUD_VAULT;
+const NIGHTLY_INDEX_HOUR = clampNumber(process.env.NIGHTLY_INDEX_HOUR, 3, 0, 23);
+const NIGHTLY_INDEX_MINUTE = clampNumber(process.env.NIGHTLY_INDEX_MINUTE, 15, 0, 59);
 const APP_SECRET = process.env.APP_SECRET || "";
 const MCP_ENABLED = process.env.MCP_ENABLED === "true";
 const MCP_HOST = process.env.MCP_HOST || "127.0.0.1";
@@ -47,18 +60,19 @@ const GITHUB_AUTH_HOSTS = parseListEnv(process.env.GITHUB_AUTH_HOSTS);
 const APP_SECRET_AUTH_HOSTS = parseListEnv(process.env.APP_SECRET_AUTH_HOSTS);
 const GITHUB_CONFIG_PRESENT = Boolean(GITHUB_CLIENT_ID || GITHUB_CLIENT_SECRET || SESSION_SECRET || GITHUB_ALLOWED_LOGINS.length);
 const GITHUB_ENABLED = Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET && SESSION_SECRET && GITHUB_ALLOWED_LOGINS.length);
-const CHAT_PROVIDER = (process.env.CHAT_PROVIDER || "deepseek").toLowerCase();
-const OPENCODE_BASE_URL = (process.env.OPENCODE_BASE_URL || "http://127.0.0.1:4096").replace(/\/+$/, "");
-const OPENCODE_AUTO_START = process.env.OPENCODE_AUTO_START !== "false";
-const OPENCODE_HOST = process.env.OPENCODE_HOST || "127.0.0.1";
-const OPENCODE_PORT = Number(process.env.OPENCODE_PORT || "4096");
-const OPENCODE_SERVER_USERNAME = process.env.OPENCODE_SERVER_USERNAME || "opencode";
-const OPENCODE_SERVER_PASSWORD = process.env.OPENCODE_SERVER_PASSWORD || "";
-const OPENCODE_REGULAR_MODEL = process.env.OPENCODE_REGULAR_MODEL || process.env.OPENCODE_MODEL || "deepseek/deepseek-v4-flash";
-const OPENCODE_THINKING_MODEL = process.env.OPENCODE_THINKING_MODEL || "deepseek/deepseek-v4-pro";
-const OPENCODE_AGENT = process.env.OPENCODE_AGENT || "";
-const OPENCODE_FINAL_POLL_MS = Math.max(250, Number(process.env.OPENCODE_FINAL_POLL_MS || "900"));
-const OPENCODE_FINAL_TIMEOUT_MS = Math.max(5000, Number(process.env.OPENCODE_FINAL_TIMEOUT_MS || "90000"));
+const CHAT_PROVIDER = (process.env.CHAT_PROVIDER || "hermes").toLowerCase();
+const HERMES_BASE_URL = (process.env.HERMES_BASE_URL || "http://127.0.0.1:8642/v1").replace(/\/+$/, "");
+const HERMES_API_KEY = process.env.HERMES_API_KEY || "";
+const HERMES_AUTO_START = process.env.HERMES_AUTO_START !== "false";
+const HERMES_HOST = process.env.HERMES_HOST || "127.0.0.1";
+const HERMES_PORT = Number(process.env.HERMES_PORT || "8642");
+const HERMES_BIN = process.env.HERMES_BIN || "";
+const HERMES_REGULAR_MODEL = process.env.HERMES_REGULAR_MODEL || process.env.HERMES_MODEL || "deepseek-v4-flash";
+const HERMES_THINKING_MODEL = process.env.HERMES_THINKING_MODEL || "deepseek-v4-pro";
+const HERMES_REQUEST_TIMEOUT_MS = Math.max(10000, Number(process.env.HERMES_REQUEST_TIMEOUT_MS || "120000"));
+const HERMES_CHAT_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_CHAT_TIMEOUT_MS || HERMES_REQUEST_TIMEOUT_MS));
+const HERMES_CHAT_SLOW_LOG_MS = Math.max(5000, Number(process.env.HERMES_CHAT_SLOW_LOG_MS || "30000"));
+const CHAT_SELECTED_CONTEXT_ENTRY_LIMIT = Math.max(4000, Number(process.env.CHAT_SELECTED_CONTEXT_ENTRY_LIMIT || "16000"));
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
 const DEEPSEEK_REGULAR_MODEL = process.env.DEEPSEEK_REGULAR_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
 const DEEPSEEK_THINKING_MODEL = process.env.DEEPSEEK_THINKING_MODEL || "deepseek-v4-pro";
@@ -99,6 +113,7 @@ const DEFAULT_MCP_ALLOWED_TOOLS = [
   "sprint.set_daily_focus",
   "dashboard.summary"
 ];
+
 const MCP_ALLOWED_TOOL_SET = new Set(MCP_ALLOWED_TOOLS.length ? MCP_ALLOWED_TOOLS : DEFAULT_MCP_ALLOWED_TOOLS);
 
 if (!VAULT_PATH) {
@@ -129,11 +144,15 @@ const watcherState = {
   lastEventAt: null,
   lastEventPath: null,
   lastRunAt: null,
+  lastAttemptAt: null,
+  nightlyEnabled: NIGHTLY_INDEX_ENABLED,
+  nextNightlyRunAt: null,
   lastReason: null,
   lastError: null
 };
 let vaultWatcher = null;
 let indexTimer = null;
+let nightlyIndexTimer = null;
 let activeIndexPromise = null;
 let indexIgnoreRules = [];
 
@@ -284,6 +303,12 @@ const server = http.createServer(async (req, res) => {
       requireWriteAuth(req);
       const body = await readRequestJson(req);
       return sendJson(res, 200, await executeCapability("chat.send_message", body));
+    }
+
+    if (url.pathname === "/api/chat/stream" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return streamChatResponse(res, body);
     }
 
     if (url.pathname === "/api/chat/capture-summary" && req.method === "POST") {
@@ -711,10 +736,19 @@ setInterval(() => {
 server.listen(PORT, HOST, () => {
   console.log(`Second Brain App running at http://${HOST}:${PORT}`);
   console.log(`Vault path: ${VAULT_PATH}`);
-  startVaultWatcher();
-  if (AUTO_INDEX_ON_START) {
-    scheduleVaultIndex("startup", 500);
+  if (VAULT_WATCH_ENABLED) {
+    startVaultWatcher();
+  } else {
+    watcherState.enabled = false;
+    watcherState.recursive = false;
+    watcherState.status = NIGHTLY_INDEX_ENABLED ? "scheduled" : "disabled";
+    watcherState.lastError = null;
+    console.log("Vault watcher disabled; using the last good index until manual or scheduled rebuild.");
   }
+  if (AUTO_INDEX_ON_START) {
+    scheduleVaultIndex("startup", IS_ICLOUD_VAULT ? ICLOUD_STARTUP_INDEX_DELAY_MS : 500);
+  }
+  startNightlyIndexScheduler();
 });
 
 if (mcpServer) {
@@ -820,11 +854,12 @@ async function getPublicConfig(req) {
       },
       service: {
         label: "com.vamshi.second-brain-app",
-        opencodeLabel: "webapp managed",
-        opencodeAutoStart: OPENCODE_AUTO_START,
-        opencodeHost: OPENCODE_HOST,
-        opencodePort: OPENCODE_PORT,
-        opencodeCwd: VAULT_PATH,
+        chatProvider: getChatProvider(),
+        hermesLabel: "webapp managed",
+        hermesAutoStart: HERMES_AUTO_START,
+        hermesHost: HERMES_HOST,
+        hermesPort: HERMES_PORT,
+        hermesCwd: VAULT_PATH,
         installCommand: "npm run service:install",
         statusCommand: "npm run service:status",
         logsCommand: "npm run service:logs",
@@ -832,17 +867,16 @@ async function getPublicConfig(req) {
       }
     },
     chat: {
-      enabled: isOpenCodeChatProvider() ? Boolean(OPENCODE_BASE_URL) : Boolean(DEEPSEEK_API_KEY),
+      enabled: isHermesChatProvider() ? Boolean(HERMES_BASE_URL) : Boolean(DEEPSEEK_API_KEY),
       provider: getChatProvider(),
-      model: isOpenCodeChatProvider() ? getOpenCodeModel(DEEPSEEK_DEFAULT_THINKING) : getDeepSeekModel(DEEPSEEK_DEFAULT_THINKING),
-      regularModel: isOpenCodeChatProvider() ? OPENCODE_REGULAR_MODEL : DEEPSEEK_REGULAR_MODEL,
-      thinkingModel: isOpenCodeChatProvider() ? OPENCODE_THINKING_MODEL : DEEPSEEK_THINKING_MODEL,
+      model: getConfiguredChatModel(DEEPSEEK_DEFAULT_THINKING),
+      regularModel: getConfiguredChatModel("disabled"),
+      thinkingModel: getConfiguredChatModel("enabled"),
       defaultThinking: DEEPSEEK_DEFAULT_THINKING,
       trainingOptOut: DEEPSEEK_TRAINING_OPT_OUT,
       contextLimit: CHAT_CONTEXT_LIMIT,
-      sessionsDir: isOpenCodeChatProvider() ? "OpenCode /session" : CHAT_SESSIONS_DIR,
-      opencodeBaseUrl: isOpenCodeChatProvider() ? OPENCODE_BASE_URL : "",
-      agent: isOpenCodeChatProvider() ? (OPENCODE_AGENT || "OpenCode default") : "",
+      sessionsDir: CHAT_SESSIONS_DIR,
+      hermesBaseUrl: isHermesChatProvider() ? HERMES_BASE_URL : "",
       runtime: chatRuntime
     },
     categories: Array.from(CAPTURE_CATEGORIES)
@@ -1114,13 +1148,18 @@ async function runVaultIndex({ reason = "manual" } = {}) {
     return activeIndexPromise;
   }
 
-  activeIndexPromise = performVaultIndex({ reason }).finally(() => {
-    activeIndexPromise = null;
-    if (watcherState.queued) {
-      watcherState.queued = false;
-      scheduleVaultIndex("queued", 100);
-    }
-  });
+  activeIndexPromise = performVaultIndex({ reason })
+    .catch(async (error) => {
+      if (!error.indexPreserved) throw error;
+      return createPreservedIndexResult({ reason, error });
+    })
+    .finally(() => {
+      activeIndexPromise = null;
+      if (watcherState.queued) {
+        watcherState.queued = false;
+        scheduleVaultIndex("queued", getIndexDelay("queued", 100));
+      }
+    });
 
   return activeIndexPromise;
 }
@@ -1136,8 +1175,9 @@ async function performVaultIndex({ reason = "manual" } = {}) {
   const notes = [];
   const tasks = [];
   for (const filePath of markdownFiles) {
-    const markdown = await fs.readFile(filePath, "utf8");
-    const stat = await fs.stat(filePath);
+    const indexedFile = await readMarkdownFileForIndex(filePath, skipped);
+    if (!indexedFile) continue;
+    const { markdown, stat } = indexedFile;
     const note = parseMarkdownNote({ filePath, markdown, stat });
     if (!shouldIndexNote(note)) {
       skipped.count += 1;
@@ -1150,6 +1190,8 @@ async function performVaultIndex({ reason = "manual" } = {}) {
     }
     tasks.push(...extractTasks(note, markdown));
   }
+
+  await assertIndexRebuildIsHealthy({ notes, skipped });
 
   const now = new Date().toISOString();
   const sql = [
@@ -1198,6 +1240,143 @@ async function performVaultIndex({ reason = "manual" } = {}) {
   };
 }
 
+async function reindexMarkdownFile(filePath, { reason = "file-update" } = {}) {
+  if (!filePath || !filePath.toLowerCase().endsWith(".md")) return null;
+  const indexedFile = await readMarkdownFileForIndex(filePath, { count: 0 });
+  if (!indexedFile) return null;
+
+  const { markdown, stat } = indexedFile;
+  const note = parseMarkdownNote({ filePath, markdown, stat });
+  const tasks = shouldSkipRelativeVaultPath(note.path) ? [] : extractTasks(note, markdown);
+  const now = new Date().toISOString();
+  const sql = [
+    "BEGIN;",
+    `DELETE FROM notes_metadata WHERE path = ${sqlValue(note.path)};`,
+    `DELETE FROM tasks WHERE path = ${sqlValue(note.path)};`,
+    shouldIndexNote(note) ? `
+      INSERT INTO notes_metadata (
+        note_id, path, title, type, name, para, project, created, updated, tags, headings, snippet, content
+      ) VALUES (
+        ${sqlValue(note.noteId)}, ${sqlValue(note.path)}, ${sqlValue(note.title)}, ${sqlValue(note.type)},
+        ${sqlValue(note.name)}, ${sqlValue(note.para)}, ${sqlValue(note.project)}, ${sqlValue(note.created)},
+        ${sqlValue(note.updated)}, ${sqlValue(note.tags)}, ${sqlValue(note.headings)}, ${sqlValue(note.snippet)},
+        ${sqlValue(note.content)}
+      );
+    ` : "",
+    ...tasks.map((task) => `
+      INSERT INTO tasks (
+        task_id, note_id, path, line_number, status, text, priority, due, effort, important, urgent, project, context, updated
+      ) VALUES (
+        ${sqlValue(task.taskId)}, ${sqlValue(task.noteId)}, ${sqlValue(task.path)}, ${task.lineNumber},
+        ${sqlValue(task.status)}, ${sqlValue(task.text)}, ${sqlValue(task.priority)}, ${sqlValue(task.due)},
+        ${sqlValue(task.effort)}, ${sqlValue(task.important)}, ${sqlValue(task.urgent)}, ${sqlValue(task.project)}, ${sqlValue(task.context)},
+        ${sqlValue(task.updated)}
+      );
+    `),
+    `
+      INSERT INTO index_runs (ran_at, note_count, task_count, skipped_count, duration_ms)
+      VALUES (${sqlValue(now)}, (SELECT COUNT(*) FROM notes_metadata), (SELECT COUNT(*) FROM tasks), 0, 0);
+    `,
+    "COMMIT;"
+  ].join("\n");
+
+  await dbExec(sql);
+  return { ok: true, reason, path: note.path, taskCount: tasks.length, ranAt: now };
+}
+
+async function assertIndexRebuildIsHealthy({ notes, skipped }) {
+  if (!skipped.readErrors) return;
+  const rows = await dbQuery(`
+    SELECT
+      (SELECT COUNT(*) FROM notes_metadata) AS current_note_count,
+      (SELECT MAX(note_count) FROM index_runs) AS historical_note_count
+  `);
+  const row = rows[0] || {};
+  const baseline = Math.max(Number(row.current_note_count || 0), Number(row.historical_note_count || 0));
+  if (baseline > 0 && notes.length < Math.floor(baseline * 0.5)) {
+    throw indexPreservedError(
+      `Vault index skipped ${skipped.readErrors} unreadable file(s) and found only ${notes.length}/${baseline} expected notes; keeping existing index.`,
+      { notesFound: notes.length, baseline, readErrors: skipped.readErrors, skippedCount: skipped.count }
+    );
+  }
+}
+
+function indexPreservedError(message, details = {}) {
+  const error = new Error(message);
+  error.indexPreserved = true;
+  error.details = details;
+  return error;
+}
+
+async function createPreservedIndexResult({ reason, error }) {
+  const status = await getIndexStatus();
+  const ranAt = new Date().toISOString();
+  return {
+    ok: true,
+    preserved: true,
+    stale: true,
+    reason,
+    ranAt,
+    lastGoodRunAt: status.lastRunAt,
+    noteCount: status.noteCount,
+    taskCount: status.taskCount,
+    openTaskCount: status.openTaskCount,
+    skippedCount: status.skippedCount,
+    durationMs: 0,
+    dbPath: DB_PATH,
+    message: error.message,
+    details: error.details || {}
+  };
+}
+
+async function readMarkdownFileForIndex(filePath, skipped) {
+  const attempts = IS_ICLOUD_VAULT ? Math.max(1, ICLOUD_READ_RETRY_COUNT) : 1;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const [markdown, stat] = await Promise.all([
+        fs.readFile(filePath, "utf8"),
+        fs.stat(filePath)
+      ]);
+      return { markdown, stat };
+    } catch (error) {
+      lastError = error;
+      if (!isRecoverableVaultReadError(error) || attempt === attempts) break;
+      await wait(Math.min(250 * attempt, 1000));
+    }
+  }
+
+  if (!isRecoverableVaultReadError(lastError)) throw lastError;
+  skipped.count += 1;
+  skipped.readErrors = (skipped.readErrors || 0) + 1;
+  skipped.readErrorsLogged = skipped.readErrorsLogged || 0;
+  if (skipped.readErrorsLogged < MAX_INDEX_READ_ERROR_LOGS) {
+    skipped.readErrorsLogged += 1;
+    console.warn(`Vault index skipped unreadable file ${toVaultPath(filePath)}: ${lastError.message}`);
+  } else if (skipped.readErrorsLogged === MAX_INDEX_READ_ERROR_LOGS) {
+    skipped.readErrorsLogged += 1;
+    console.warn("Vault index skipped additional unreadable files; suppressing per-file iCloud read warnings for this pass.");
+  }
+  return null;
+}
+
+function isRecoverableVaultReadError(error) {
+  const message = String(error?.message || "");
+  return [
+    "ENOENT",
+    "ENOTDIR",
+    "EACCES",
+    "EPERM",
+    "EBUSY",
+    "EIO"
+  ].includes(error?.code) || message.includes("Unknown system error -11");
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function startVaultWatcher() {
   if (vaultWatcher) return;
 
@@ -1230,7 +1409,7 @@ function handleVaultWatchEvent(eventType, filename) {
   watcherState.eventCount += 1;
   watcherState.lastEventAt = new Date().toISOString();
   watcherState.lastEventPath = relativePath || "(unknown)";
-  scheduleVaultIndex(`watch:${eventType}`, WATCH_DEBOUNCE_MS);
+  scheduleVaultIndex(`watch:${eventType}`, getIndexDelay(`watch:${eventType}`, WATCH_DEBOUNCE_MS));
 }
 
 function shouldIgnoreWatchEvent(relativePath) {
@@ -1247,6 +1426,13 @@ function scheduleVaultIndex(reason, delayMs = WATCH_DEBOUNCE_MS) {
     watcherState.pending = false;
     try {
       const result = await runVaultIndex({ reason });
+      watcherState.lastAttemptAt = result.ranAt;
+      if (result.preserved) {
+        watcherState.lastError = result.message;
+        watcherState.status = watcherState.enabled ? "stale" : watcherState.status;
+        console.warn(`Vault index kept previous good index (${reason}): ${result.message}`);
+        return;
+      }
       watcherState.lastRunAt = result.ranAt;
       watcherState.lastError = null;
       watcherState.status = watcherState.enabled ? "watching" : watcherState.status;
@@ -1257,6 +1443,57 @@ function scheduleVaultIndex(reason, delayMs = WATCH_DEBOUNCE_MS) {
       console.warn(`Vault index rebuild failed (${reason}): ${error.message}`);
     }
   }, delayMs);
+}
+
+function startNightlyIndexScheduler() {
+  if (!NIGHTLY_INDEX_ENABLED || nightlyIndexTimer) return;
+  const nextRun = getNextNightlyIndexRun();
+  watcherState.nightlyEnabled = true;
+  watcherState.nextNightlyRunAt = nextRun.toISOString();
+  const delayMs = Math.max(1000, nextRun.getTime() - Date.now());
+  nightlyIndexTimer = setTimeout(runNightlyIndex, delayMs);
+  console.log(`Nightly vault index scheduled for ${watcherState.nextNightlyRunAt}.`);
+}
+
+async function runNightlyIndex() {
+  nightlyIndexTimer = null;
+  watcherState.pending = true;
+  watcherState.lastReason = "nightly";
+  try {
+    const result = await runVaultIndex({ reason: "nightly" });
+    watcherState.lastAttemptAt = result.ranAt;
+    if (result.preserved) {
+      watcherState.lastError = result.message;
+      watcherState.status = VAULT_WATCH_ENABLED ? "stale" : "scheduled";
+      console.warn(`Nightly vault index kept previous good index: ${result.message}`);
+      return;
+    }
+    watcherState.lastRunAt = result.ranAt;
+    watcherState.lastError = null;
+    watcherState.status = VAULT_WATCH_ENABLED ? "watching" : "scheduled";
+    console.log(`Nightly vault index rebuilt in ${result.durationMs}ms.`);
+  } catch (error) {
+    watcherState.lastError = error.message;
+    watcherState.status = VAULT_WATCH_ENABLED ? "error" : "scheduled";
+    console.warn(`Nightly vault index failed: ${error.message}`);
+  } finally {
+    watcherState.pending = false;
+    startNightlyIndexScheduler();
+  }
+}
+
+function getNextNightlyIndexRun(now = new Date()) {
+  const next = new Date(now);
+  next.setHours(NIGHTLY_INDEX_HOUR, NIGHTLY_INDEX_MINUTE, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  return next;
+}
+
+function getIndexDelay(reason, fallbackMs = WATCH_DEBOUNCE_MS) {
+  if (!IS_ICLOUD_VAULT) return fallbackMs;
+  if (String(reason || "").startsWith("watch:")) return Math.max(fallbackMs, ICLOUD_WATCH_DEBOUNCE_MS);
+  if (reason === "queued") return Math.max(fallbackMs, Math.floor(ICLOUD_WATCH_DEBOUNCE_MS / 2));
+  return fallbackMs;
 }
 
 function windowClearTimeout(timer) {
@@ -1358,8 +1595,8 @@ async function searchNotes(query, limit = 20) {
 }
 
 async function answerChat(body) {
-  if (isOpenCodeChatProvider()) {
-    return answerOpenCodeChat(body);
+  if (isHermesChatProvider()) {
+    return answerHermesChat(body);
   }
   return answerDeepSeekChat(body);
 }
@@ -1422,48 +1659,143 @@ async function answerDeepSeekChat(body) {
   };
 }
 
-async function answerOpenCodeChat(body) {
-  const message = normalizeChatMessage(body?.message);
-  const deepWork = normalizeDeepWork(body?.deepWork);
-  const references = parseChatReferences(message, body);
-  const session = await ensureOpenCodeSession(body?.sessionPath, message);
-  const [skill, people, files] = await Promise.all([
-    references.skill ? getSkillPromptAny(references.skill) : Promise.resolve(null),
-    references.people.length ? getPeopleContexts(references.people) : Promise.resolve([]),
-    references.files.length ? getFileContexts(references.files) : Promise.resolve([])
-  ]);
-  const response = await callOpenCodeChatCompletion({
-    sessionId: session.id,
-    message,
-    thinkingMode: normalizeThinkingMode(body?.thinkingMode),
-    skill,
-    people,
-    files,
-    deepWork
-  });
+async function answerHermesChat(body) {
+  const context = await prepareHermesChatContext(body);
 
-  const updatedSession = await getOpenCodeSession(session.id).catch(() => session);
-  await appendDeepWorkExchange({
-    deepWork,
-    chatSession: updatedSession,
-    message,
+  const response = await callHermesChatCompletion({
+    message: context.message,
+    history: context.history,
+    thinkingMode: context.thinkingMode,
+    skill: context.skill,
+    people: context.people,
+    files: context.files,
+    deepWork: context.deepWork
+  });
+  const session = context.existingSession || await createChatSession({ title: deriveChatSessionTitle(context.message) });
+  await appendChatSessionExchange({
+    sessionPath: session.path,
+    message: context.message,
     response,
-    skill,
-    people,
-    sources: files
+    mentor: null,
+    assistant: context.skill,
+    people: context.people,
+    sources: context.files
+  });
+  await appendDeepWorkExchange({
+    deepWork: context.deepWork,
+    chatSession: session,
+    message: context.message,
+    response,
+    skill: context.skill,
+    people: context.people,
+    sources: context.files
   });
 
   return {
     answer: response.answer,
     model: response.model,
     thinkingMode: response.thinkingMode,
-    session: updatedSession,
+    session,
     mentor: null,
-    assistant: skill ? formatContextSource(skill) : null,
-    people: people.map(formatContextSource),
-    sources: files.map(formatChatSource),
-    deepWork
+    assistant: context.skill ? formatContextSource(context.skill) : null,
+    people: context.people.map(formatContextSource),
+    sources: context.files.map(formatChatSource),
+    deepWork: context.deepWork
   };
+}
+
+async function prepareHermesChatContext(body) {
+  const message = normalizeChatMessage(body?.message);
+  const history = normalizeChatHistory(body?.history);
+  const thinkingMode = normalizeThinkingMode(body?.thinkingMode);
+  const deepWork = normalizeDeepWork(body?.deepWork);
+  const references = parseChatReferences(message, body);
+  const requestedSessionPath = normalizeOptionalChatSessionPath(body?.sessionPath);
+  const existingSession = requestedSessionPath ? await readChatSessionMetadata(requestedSessionPath) : null;
+  const [skill, people, files] = await Promise.all([
+    references.skill ? getSkillPromptAny(references.skill) : Promise.resolve(null),
+    references.people.length ? getPeopleContexts(references.people) : Promise.resolve([]),
+    references.files.length ? getFileContexts(references.files) : Promise.resolve([])
+  ]);
+  return { message, history, thinkingMode, deepWork, skill, people, files, existingSession };
+}
+
+async function streamChatResponse(res, body) {
+  res.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+
+  const writeEvent = (event) => {
+    res.write(`${JSON.stringify(event)}\n`);
+  };
+
+  try {
+    if (!isHermesChatProvider()) {
+      const result = await answerChat(body);
+      writeEvent({ type: "done", ...result });
+      return res.end();
+    }
+
+    const context = await prepareHermesChatContext(body);
+    const session = context.existingSession || await createChatSession({ title: deriveChatSessionTitle(context.message) });
+    writeEvent({ type: "session", session });
+
+    let answer = "";
+    const response = await callHermesChatCompletionStream({
+      message: context.message,
+      history: context.history,
+      thinkingMode: context.thinkingMode,
+      skill: context.skill,
+      people: context.people,
+      files: context.files,
+      deepWork: context.deepWork,
+      onDelta: (delta) => {
+        answer += delta;
+        writeEvent({ type: "delta", delta });
+      }
+    });
+
+    if (!answer.trim()) answer = response.answer;
+    const savedResponse = { ...response, answer };
+    await appendChatSessionExchange({
+      sessionPath: session.path,
+      message: context.message,
+      response: savedResponse,
+      mentor: null,
+      assistant: context.skill,
+      people: context.people,
+      sources: context.files
+    });
+    await appendDeepWorkExchange({
+      deepWork: context.deepWork,
+      chatSession: session,
+      message: context.message,
+      response: savedResponse,
+      skill: context.skill,
+      people: context.people,
+      sources: context.files
+    });
+
+    writeEvent({
+      type: "done",
+      answer,
+      model: response.model,
+      thinkingMode: response.thinkingMode,
+      session,
+      mentor: null,
+      assistant: context.skill ? formatContextSource(context.skill) : null,
+      people: context.people.map(formatContextSource),
+      sources: context.files.map(formatChatSource),
+      deepWork: context.deepWork
+    });
+  } catch (error) {
+    writeEvent({ type: "error", error: error.expose ? error.message : "Chat request failed." });
+  } finally {
+    res.end();
+  }
 }
 
 function normalizeOptionalChatSessionPath(sessionPath) {
@@ -1492,114 +1824,113 @@ function normalizeOptionalDeepWorkSessionPath(sessionPath) {
 }
 
 function getChatProvider() {
-  return CHAT_PROVIDER === "opencode" ? "opencode" : "deepseek";
+  if (CHAT_PROVIDER === "hermes") return "hermes";
+  return "deepseek";
 }
 
-function isOpenCodeChatProvider() {
-  return getChatProvider() === "opencode";
+function isHermesChatProvider() {
+  return getChatProvider() === "hermes";
 }
 
-function normalizeOpenCodeSessionId(value) {
-  return String(value || "").trim().replace(/^opencode:/, "");
+function isVaultAgentChatProvider() {
+  return isHermesChatProvider();
+}
+
+function getConfiguredChatModel(thinkingMode) {
+  if (isHermesChatProvider()) return getHermesModel(thinkingMode);
+  return getDeepSeekModel(thinkingMode);
 }
 
 async function getChatModels() {
-  if (!isOpenCodeChatProvider()) {
+  if (isHermesChatProvider()) {
+    const models = await readHermesModels().catch(() => []);
     return {
-      provider: "deepseek",
-      regularModel: DEEPSEEK_REGULAR_MODEL,
-      thinkingModel: DEEPSEEK_THINKING_MODEL,
-      models: [
-        { id: DEEPSEEK_REGULAR_MODEL, name: DEEPSEEK_REGULAR_MODEL },
-        { id: DEEPSEEK_THINKING_MODEL, name: DEEPSEEK_THINKING_MODEL }
+      provider: "hermes",
+      regularModel: HERMES_REGULAR_MODEL,
+      thinkingModel: HERMES_THINKING_MODEL,
+      models: models.length ? models : [
+        { id: HERMES_REGULAR_MODEL, name: HERMES_REGULAR_MODEL },
+        { id: HERMES_THINKING_MODEL, name: HERMES_THINKING_MODEL }
       ]
     };
   }
 
-  const models = await readOpenCodeModels().catch(() => []);
   return {
-    provider: "opencode",
-    regularModel: OPENCODE_REGULAR_MODEL,
-    thinkingModel: OPENCODE_THINKING_MODEL,
-    models
+    provider: "deepseek",
+    regularModel: DEEPSEEK_REGULAR_MODEL,
+    thinkingModel: DEEPSEEK_THINKING_MODEL,
+    models: [
+      { id: DEEPSEEK_REGULAR_MODEL, name: DEEPSEEK_REGULAR_MODEL },
+      { id: DEEPSEEK_THINKING_MODEL, name: DEEPSEEK_THINKING_MODEL }
+    ]
   };
 }
 
 async function getChatRuntimeStatus() {
-  if (!isOpenCodeChatProvider()) {
-    return {
-      provider: "deepseek",
-      status: DEEPSEEK_API_KEY ? "configured" : "missing-key",
-      reachable: Boolean(DEEPSEEK_API_KEY),
-      checkedAt: new Date().toISOString(),
-      detail: DEEPSEEK_API_KEY ? "DeepSeek API key configured" : "DEEPSEEK_API_KEY is not configured"
-    };
-  }
-
-  const started = Date.now();
-  const headers = { "Accept": "application/json" };
-  if (OPENCODE_SERVER_PASSWORD) {
-    headers.Authorization = `Basic ${Buffer.from(`${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}`).toString("base64")}`;
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1400);
-  try {
-    const response = await fetch(`${OPENCODE_BASE_URL}/session`, {
-      headers,
-      signal: controller.signal
-    });
-    const durationMs = Date.now() - started;
-    if (!response.ok) {
+  if (isHermesChatProvider()) {
+    const started = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1400);
+    try {
+      const response = await fetch(getHermesHealthUrl(), {
+        headers: getHermesHeaders(),
+        signal: controller.signal
+      });
+      const durationMs = Date.now() - started;
+      if (!response.ok) {
+        return {
+          provider: "hermes",
+          status: "error",
+          reachable: false,
+          baseUrl: HERMES_BASE_URL,
+          checkedAt: new Date().toISOString(),
+          latencyMs: durationMs,
+          detail: `Hermes responded with HTTP ${response.status}`
+        };
+      }
       return {
-        provider: "opencode",
-        status: "error",
-        reachable: false,
-        baseUrl: OPENCODE_BASE_URL,
-        agent: OPENCODE_AGENT || "OpenCode default",
+        provider: "hermes",
+        status: "online",
+        reachable: true,
+        baseUrl: HERMES_BASE_URL,
         checkedAt: new Date().toISOString(),
         latencyMs: durationMs,
-        detail: `OpenCode responded with HTTP ${response.status}`
+        detail: "Hermes API server reachable"
       };
+    } catch (error) {
+      return {
+        provider: "hermes",
+        status: "offline",
+        reachable: false,
+        baseUrl: HERMES_BASE_URL,
+        checkedAt: new Date().toISOString(),
+        detail: error.name === "AbortError"
+          ? "Hermes health check timed out"
+          : `Hermes is not reachable at ${HERMES_BASE_URL}`
+      };
+    } finally {
+      clearTimeout(timer);
     }
-    const data = await response.json().catch(() => []);
-    const sessionCount = Array.isArray(data) ? data.length : Array.isArray(data?.sessions) ? data.sessions.length : null;
-    return {
-      provider: "opencode",
-      status: "online",
-      reachable: true,
-      baseUrl: OPENCODE_BASE_URL,
-      agent: OPENCODE_AGENT || "OpenCode default",
-      checkedAt: new Date().toISOString(),
-      latencyMs: durationMs,
-      detail: sessionCount === null ? "OpenCode reachable" : `${sessionCount} session${sessionCount === 1 ? "" : "s"} visible`
-    };
-  } catch (error) {
-    return {
-      provider: "opencode",
-      status: "offline",
-      reachable: false,
-      baseUrl: OPENCODE_BASE_URL,
-      agent: OPENCODE_AGENT || "OpenCode default",
-      checkedAt: new Date().toISOString(),
-      detail: error.name === "AbortError"
-        ? "OpenCode health check timed out"
-        : `OpenCode is not reachable at ${OPENCODE_BASE_URL}`
-    };
-  } finally {
-    clearTimeout(timer);
   }
+
+  return {
+    provider: "deepseek",
+    status: DEEPSEEK_API_KEY ? "configured" : "missing-key",
+    reachable: Boolean(DEEPSEEK_API_KEY),
+    checkedAt: new Date().toISOString(),
+    detail: DEEPSEEK_API_KEY ? "DeepSeek API key configured" : "DEEPSEEK_API_KEY is not configured"
+  };
 }
 
 async function summarizeChatCapture(body = {}) {
-  if (!isOpenCodeChatProvider() && !DEEPSEEK_API_KEY) {
+  if (!isHermesChatProvider() && !DEEPSEEK_API_KEY) {
     throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable AI capture summaries.");
   }
   const category = normalizeCaptureSummaryCategory(body?.category);
   const text = normalizeCaptureSummaryInput(body?.text);
-  const summary = isOpenCodeChatProvider()
-    ? await callOpenCodeCaptureSummary({ category, text })
-    : await callDeepSeekCaptureSummary({ category, text });
+  const summary = isHermesChatProvider()
+      ? await callHermesCaptureSummary({ category, text })
+      : await callDeepSeekCaptureSummary({ category, text });
   return {
     category,
     summary
@@ -1622,14 +1953,14 @@ async function captureChatSummary(body = {}) {
 }
 
 async function extractChatTodos(body = {}) {
-  if (!isOpenCodeChatProvider() && !DEEPSEEK_API_KEY) {
+  if (!isHermesChatProvider() && !DEEPSEEK_API_KEY) {
     throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable AI todo extraction.");
   }
   const text = normalizeCaptureSummaryInput(body?.text);
   const source = body?.source || body?.sessionPath || "";
-  const extracted = isOpenCodeChatProvider()
-    ? await callOpenCodeTodoExtraction({ text })
-    : await callDeepSeekTodoExtraction({ text });
+  const extracted = isHermesChatProvider()
+      ? await callHermesTodoExtraction({ text })
+      : await callDeepSeekTodoExtraction({ text });
   const todos = extracted.map(normalizeExtractedTodo).filter((todo) => todo.text);
   const captures = [];
   for (const todo of todos.slice(0, 12)) {
@@ -1642,7 +1973,6 @@ async function extractChatTodos(body = {}) {
       source
     }));
   }
-  if (captures.length) await runVaultIndex({ reason: "chat-todos" });
   return {
     todos: todos.slice(0, 12),
     captures,
@@ -1652,17 +1982,17 @@ async function extractChatTodos(body = {}) {
 }
 
 async function createStructuredChatNote(body = {}) {
-  if (!isOpenCodeChatProvider() && !DEEPSEEK_API_KEY) {
+  if (!isHermesChatProvider() && !DEEPSEEK_API_KEY) {
     throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable structured note generation.");
   }
   const text = normalizeCaptureSummaryInput(body?.text);
   const source = normalizeCaptureSource(body?.source || body?.sessionPath);
-  const generated = isOpenCodeChatProvider()
-    ? await callOpenCodeStructuredNote({ text })
-    : await callDeepSeekStructuredNote({ text });
+  const generated = isHermesChatProvider()
+      ? await callHermesStructuredNote({ text })
+      : await callDeepSeekStructuredNote({ text });
   const note = normalizeStructuredNote(generated);
   const relativePath = await writeStructuredChatNote({ note, source });
-  await runVaultIndex({ reason: "chat-note" });
+  await reindexMarkdownFile(resolveVaultRelativePath(relativePath), { reason: "chat-note" });
   return {
     note: {
       title: note.title,
@@ -1674,7 +2004,7 @@ async function createStructuredChatNote(body = {}) {
 }
 
 async function createMonthlyFleetingReview(body = {}) {
-  if (!isOpenCodeChatProvider() && !DEEPSEEK_API_KEY) {
+  if (!isHermesChatProvider() && !DEEPSEEK_API_KEY) {
     throw httpError(503, "DEEPSEEK_API_KEY is not configured. Add it to .env to enable monthly fleeting reviews.");
   }
   const month = normalizeMonthInput(body?.month);
@@ -1684,12 +2014,12 @@ async function createMonthlyFleetingReview(body = {}) {
     throw httpError(404, `No fleeting entries found for ${month}.`);
   }
   const sourcePath = toVaultPath(filePath);
-  const generated = isOpenCodeChatProvider()
-    ? await callOpenCodeMonthlyFleetingReview({ month, markdown })
-    : await callDeepSeekMonthlyFleetingReview({ month, markdown });
+  const generated = isHermesChatProvider()
+      ? await callHermesMonthlyFleetingReview({ month, markdown })
+      : await callDeepSeekMonthlyFleetingReview({ month, markdown });
   const review = normalizeMonthlyFleetingReview(generated, { month });
   const relativePath = await writeMonthlyFleetingReview({ review, month, sourcePath });
-  await runVaultIndex({ reason: "monthly-fleeting-review" });
+  await reindexMarkdownFile(resolveVaultRelativePath(relativePath), { reason: "monthly-fleeting-review" });
   return {
     review: {
       title: review.title,
@@ -1738,23 +2068,11 @@ function normalizeThinkingMode(value) {
   return value === "enabled" || value === "disabled" ? value : DEEPSEEK_DEFAULT_THINKING;
 }
 
-function getOpenCodeModel(thinkingMode) {
-  return thinkingMode === "enabled" ? OPENCODE_THINKING_MODEL : OPENCODE_REGULAR_MODEL;
-}
-
-function getOpenCodeModelRef(thinkingMode) {
-  const { providerID, modelID } = parseOpenCodeModelId(getOpenCodeModel(thinkingMode));
-  if (!providerID || !modelID) {
-    throw httpError(500, "OpenCode model must use provider/model format.");
-  }
-  return {
-    providerID,
-    modelID
-  };
+function getHermesModel(thinkingMode) {
+  return thinkingMode === "enabled" ? HERMES_THINKING_MODEL : HERMES_REGULAR_MODEL;
 }
 
 async function ensureChatSession(sessionPath, firstMessage = "") {
-  if (isOpenCodeChatProvider()) return ensureOpenCodeSession(sessionPath, firstMessage);
   const cleanPath = String(sessionPath || "").trim();
   if (cleanPath) {
     return readChatSessionMetadata(cleanPath);
@@ -1763,7 +2081,6 @@ async function ensureChatSession(sessionPath, firstMessage = "") {
 }
 
 async function createChatSession(body = {}) {
-  if (isOpenCodeChatProvider()) return createOpenCodeSession(body);
   const now = new Date();
   const title = normalizeSessionTitle(body?.title) || "New chat";
   const id = `chat-${now.toISOString().replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}`;
@@ -1798,7 +2115,6 @@ async function createChatSession(body = {}) {
 }
 
 async function listChatSessions(limit = 20) {
-  if (isOpenCodeChatProvider()) return listOpenCodeSessions(limit);
   const dir = resolveVaultRelativePath(CHAT_SESSIONS_DIR);
   let entries = [];
   try {
@@ -1823,7 +2139,6 @@ async function listChatSessions(limit = 20) {
 }
 
 async function readChatSession(sessionPath) {
-  if (isOpenCodeChatProvider()) return readOpenCodeSession(sessionPath);
   const session = await readChatSessionMetadata(sessionPath);
   const markdown = await fs.readFile(resolveChatSessionPath(session.path), "utf8");
   return {
@@ -1847,58 +2162,14 @@ async function readChatSessionMetadata(sessionPath) {
   };
 }
 
-async function ensureOpenCodeSession(sessionPath, firstMessage = "") {
-  const id = normalizeOpenCodeSessionId(sessionPath);
-  if (id) return getOpenCodeSession(id);
-  return createOpenCodeSession({});
-}
-
-async function createOpenCodeSession(body = {}) {
-  const title = normalizeSessionTitle(body?.title) || "New chat";
-  const payload = normalizeSessionTitle(body?.title) ? { title } : {};
-  return formatOpenCodeSession(await openCodeFetch("/session", {
-    method: "POST",
-    body: payload
-  }));
-}
-
 async function updateChatSession(body = {}) {
   const title = normalizeSessionTitle(body?.title);
   if (!title) throw httpError(400, "Session title is required.");
-  if (isOpenCodeChatProvider()) return updateOpenCodeSession(body?.path || body?.sessionPath, title);
   return updateMarkdownChatSession(body?.path || body?.sessionPath, title);
 }
 
 async function deleteChatSession(body = {}) {
-  if (isOpenCodeChatProvider()) return deleteOpenCodeSession(body?.path || body?.sessionPath);
   return deleteMarkdownChatSession(body?.path || body?.sessionPath);
-}
-
-async function updateOpenCodeSession(sessionPath, title) {
-  const id = normalizeOpenCodeSessionId(sessionPath);
-  if (!id) throw httpError(400, "OpenCode session id is required.");
-  return {
-    session: formatOpenCodeSession(await openCodeFetch(`/session/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: { title }
-    }))
-  };
-}
-
-async function deleteOpenCodeSession(sessionPath) {
-  const id = normalizeOpenCodeSessionId(sessionPath);
-  if (!id) throw httpError(400, "OpenCode session id is required.");
-  await openCodeFetch(`/session/${encodeURIComponent(id)}`, { method: "DELETE" });
-  return { deleted: true, path: `opencode:${id}` };
-}
-
-async function deleteOpenCodeHelperSession(session) {
-  if (!session?.id) return;
-  try {
-    await deleteOpenCodeSession(`opencode:${session.id}`);
-  } catch {
-    // Helper sessions are disposable; a cleanup failure should not block the user-facing workflow.
-  }
 }
 
 async function updateMarkdownChatSession(sessionPath, title) {
@@ -2187,266 +2458,126 @@ function appendToMarkdownSection(markdown, heading, content) {
     : `${before}\n\n${cleanContent}\n`;
 }
 
-async function listOpenCodeSessions(limit = 20) {
-  const sessions = await openCodeFetch("/session");
-  const list = Array.isArray(sessions) ? sessions : [];
-  const formatted = list
-    .map(formatOpenCodeSession)
-    .sort((a, b) => String(b.updated || "").localeCompare(String(a.updated || "")))
-    .slice(0, Number(limit));
-  return { sessions: formatted, dir: "OpenCode /session" };
-}
-
-async function readOpenCodeSession(sessionPath) {
-  const session = await getOpenCodeSession(sessionPath);
-  const messages = await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`);
-  return {
-    session,
-    messages: formatOpenCodeMessages(messages)
-  };
-}
-
-async function getOpenCodeSession(sessionPath) {
-  const id = normalizeOpenCodeSessionId(sessionPath);
-  if (!id) throw httpError(400, "OpenCode session id is required.");
-  return formatOpenCodeSession(await openCodeFetch(`/session/${encodeURIComponent(id)}`));
-}
-
-async function readOpenCodeModels() {
-  const directModels = await openCodeFetch("/models").catch(() => openCodeFetch("/model").catch(() => null));
-  if (Array.isArray(directModels)) return directModels.map(formatDirectOpenCodeModel).filter(Boolean);
-  if (Array.isArray(directModels?.models)) return directModels.models.map(formatDirectOpenCodeModel).filter(Boolean);
-
-  const providers = await openCodeFetch("/provider");
-  const all = Array.isArray(providers?.all) ? providers.all : Array.isArray(providers) ? providers : [];
-  const models = [];
-  for (const provider of all) {
-    const providerID = provider.id || provider.providerID || provider.name;
-    const providerName = provider.name || providerID;
-    const providerModels = provider.models || provider.model || {};
-    if (Array.isArray(providerModels)) {
-      for (const model of providerModels) {
-        const modelID = model.id || model.modelID || model.name;
-        if (providerID && modelID) models.push(formatOpenCodeModel(providerID, providerName, modelID, model));
-      }
-      continue;
-    }
-    for (const [modelID, model] of Object.entries(providerModels)) {
-      models.push(formatOpenCodeModel(providerID, providerName, modelID, model || {}));
-    }
-  }
-  return models;
-}
-
-function formatDirectOpenCodeModel(model = {}) {
-  const id = model.id || model.model || "";
-  if (typeof model === "string") {
-    const parsed = parseOpenCodeModelId(model);
-    if (!parsed.providerID || !parsed.modelID) return null;
-    return {
-      id: `${parsed.providerID}/${parsed.modelID}`,
-      providerID: parsed.providerID,
-      modelID: parsed.modelID,
-      providerName: parsed.providerID,
-      name: parsed.modelID
-    };
-  }
-  if (!id && !(model.providerID && model.modelID)) return null;
-  const parsed = model.providerID && model.modelID
-    ? { providerID: model.providerID, modelID: model.modelID }
-    : parseOpenCodeModelId(id);
-  return {
-    id: `${parsed.providerID}/${parsed.modelID}`,
-    providerID: parsed.providerID,
-    modelID: parsed.modelID,
-    providerName: model.providerName || parsed.providerID,
-    name: model.name || model.label || parsed.modelID
-  };
-}
-
-function parseOpenCodeModelId(value) {
-  const [providerID, ...modelParts] = String(value || "").split("/");
-  return {
-    providerID,
-    modelID: modelParts.join("/")
-  };
-}
-
-function formatOpenCodeModel(providerID, providerName, modelID, model = {}) {
-  return {
-    id: `${providerID}/${modelID}`,
-    providerID,
-    modelID,
-    providerName,
-    name: model.name || model.label || modelID
-  };
-}
-
-function formatOpenCodeSession(session = {}) {
-  const id = String(session.id || session.sessionID || session.sessionId || "").trim();
-  if (!id) throw httpError(502, "OpenCode returned a session without an id.");
-  const title = session.title || session.name || "OpenCode chat";
-  const created = session.time?.created || session.created || session.createdAt || "";
-  const updated = session.time?.updated || session.updated || session.updatedAt || created;
-  return {
-    id,
-    title,
-    path: `opencode:${id}`,
-    created,
-    updated
-  };
-}
-
-function formatOpenCodeMessages(items) {
-  if (!Array.isArray(items)) return [];
-  return items
-    .map((item) => {
-      const role = getOpenCodeMessageRole(item);
-      const content = extractOpenCodeText(item).trim();
-      if (!content) return null;
-      return {
-        id: `${role}-${item?.info?.id || hash(content).slice(0, 12)}`,
-        role,
-        content,
-        sources: [],
-        mentor: null,
-        assistant: null,
-        people: [],
-        thinkingMode: role === "assistant" ? "opencode" : "",
-        model: item?.info?.modelID || item?.info?.model || ""
-      };
-    })
-    .filter(Boolean);
-}
-
-async function callOpenCodeChatCompletion({ sessionId, message, thinkingMode, skill, people, files, deepWork }) {
-  const modelRef = getOpenCodeModelRef(thinkingMode);
-  const prompt = buildOpenCodePrompt({ message, skill, people, files, deepWork });
-  const body = {
-    model: modelRef,
-    parts: [{ type: "text", text: prompt }]
-  };
-  if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
-
-  await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message`, {
+async function callHermesChatCompletion({ message, history, thinkingMode, skill, people, files, deepWork }) {
+  const model = getHermesModel(thinkingMode);
+  const messages = buildHermesChatMessages({ message, history, skill, people, files, deepWork });
+  const started = Date.now();
+  const data = await hermesFetch("/chat/completions", {
     method: "POST",
-    body
+    timeoutMs: HERMES_CHAT_TIMEOUT_MS,
+    body: {
+      model,
+      stream: false,
+      messages
+    }
   });
-  const finalAnswer = await waitForOpenCodeFinalAnswer(sessionId);
+  logSlowHermesChat({ started, model, streamed: false });
   return {
-    answer: finalAnswer || "OpenCode did not return a text response.",
-    model: `${modelRef.providerID}/${modelRef.modelID}`,
-    thinkingMode
+    model,
+    thinkingMode,
+    answer: extractOpenAiCompatibleText(data) || "Hermes did not return a text response."
   };
 }
 
-async function callOpenCodeCaptureSummary({ category, text }) {
-  let session = null;
-  try {
-    session = await createOpenCodeSession({ title: "Capture summary" });
-    const modelRef = getOpenCodeModelRef("disabled");
-    const body = {
-      model: modelRef,
-        parts: [{
-          type: "text",
-          text: [
-            "You are summarizing provided chat text into an Obsidian fleeting-note capture.",
-            "Use only the text between <chat_text> tags below. Do not ask for more input.",
-            "Return one or two plain sentences that capture the key concept, decision, or reusable insight.",
-            "Do not include bullets, labels, source links, markdown headings, or commentary.",
+async function callHermesChatCompletionStream({ message, history, thinkingMode, skill, people, files, deepWork, onDelta }) {
+  const model = getHermesModel(thinkingMode);
+  const messages = buildHermesChatMessages({ message, history, skill, people, files, deepWork });
+  const started = Date.now();
+  const data = await hermesFetchStream("/chat/completions", {
+    method: "POST",
+    timeoutMs: HERMES_CHAT_TIMEOUT_MS,
+    body: {
+      model,
+      stream: true,
+      messages
+    },
+    onDelta
+  });
+  logSlowHermesChat({ started, model, streamed: true });
+  return {
+    model,
+    thinkingMode,
+    answer: data.answer || "Hermes did not return a text response."
+  };
+}
+
+function buildHermesChatMessages({ message, history, skill, people, files, deepWork }) {
+  const prompt = buildSelectedContextPrompt({ message, skill, people, files, deepWork });
+  return [
+    ...history.map((item) => ({ role: item.role, content: item.content })),
+    { role: "user", content: prompt }
+  ];
+}
+
+async function callHermesCaptureSummary({ category, text }) {
+  const data = await hermesFetch("/chat/completions", {
+    method: "POST",
+    body: {
+      model: HERMES_REGULAR_MODEL,
+      stream: false,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You convert assistant responses into concise Obsidian fleeting-note captures.",
+            "Return only one or two plain sentences.",
+            "Capture the key concept, decision, or reusable insight.",
+            "Do not include markdown bullets, headings, labels, quotes, source links, or commentary.",
+            "Keep it under 60 words."
+          ].join(" ")
+        },
+        {
+          role: "user",
+          content: [
             `Capture category: ${category}`,
             "",
-            "<chat_text>",
-            clipText(text, 6000),
-            "</chat_text>"
+            "Assistant response:",
+            clipText(text, 6000)
           ].join("\n")
-        }]
-      };
-    if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
-    await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
-      method: "POST",
-      body
-    });
-    const answer = await waitForOpenCodeFinalAnswer(session.id);
-    const summary = normalizeAiCaptureSummary(answer);
-    if (!summary) throw httpError(502, "OpenCode did not return a capture summary.");
-    return summary;
-  } finally {
-    await deleteOpenCodeHelperSession(session);
-  }
+        }
+      ]
+    }
+  });
+  const summary = normalizeAiCaptureSummary(extractOpenAiCompatibleText(data));
+  if (!summary) throw httpError(502, "Hermes did not return a capture summary.");
+  return summary;
 }
 
-async function callOpenCodeTodoExtraction({ text }) {
-  let session = null;
-  try {
-    session = await createOpenCodeSession({ title: "Todo extraction" });
-    const modelRef = getOpenCodeModelRef("disabled");
-    const body = {
-      model: modelRef,
-      parts: [{
-        type: "text",
-        text: buildTodoExtractionPrompt(text)
-      }]
-    };
-    if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
-    await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
-      method: "POST",
-      body
-    });
-    const answer = await waitForOpenCodeFinalAnswer(session.id);
-    return parseTodoExtractionResponse(answer);
-  } finally {
-    await deleteOpenCodeHelperSession(session);
-  }
+async function callHermesTodoExtraction({ text }) {
+  const data = await hermesFetch("/chat/completions", {
+    method: "POST",
+    body: {
+      model: HERMES_REGULAR_MODEL,
+      stream: false,
+      messages: [{ role: "user", content: buildTodoExtractionPrompt(text) }]
+    }
+  });
+  return parseTodoExtractionResponse(extractOpenAiCompatibleText(data));
 }
 
-async function callOpenCodeStructuredNote({ text }) {
-  let session = null;
-  try {
-    session = await createOpenCodeSession({ title: "Structured note" });
-    const modelRef = getOpenCodeModelRef("disabled");
-    const body = {
-      model: modelRef,
-      parts: [{
-        type: "text",
-        text: buildStructuredNotePrompt(text)
-      }]
-    };
-    if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
-    await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
-      method: "POST",
-      body
-    });
-    const answer = await waitForOpenCodeFinalAnswer(session.id);
-    return parseStructuredNoteResponse(answer);
-  } finally {
-    await deleteOpenCodeHelperSession(session);
-  }
+async function callHermesStructuredNote({ text }) {
+  const data = await hermesFetch("/chat/completions", {
+    method: "POST",
+    body: {
+      model: HERMES_REGULAR_MODEL,
+      stream: false,
+      messages: [{ role: "user", content: buildStructuredNotePrompt(text) }]
+    }
+  });
+  return parseStructuredNoteResponse(extractOpenAiCompatibleText(data));
 }
 
-async function callOpenCodeMonthlyFleetingReview({ month, markdown }) {
+async function callHermesMonthlyFleetingReview({ month, markdown }) {
   if (TEST_AI_JSON) return parseStructuredNoteResponse(TEST_AI_JSON);
-  let session = null;
-  try {
-    session = await createOpenCodeSession({ title: `Fleeting review ${month}` });
-    const modelRef = getOpenCodeModelRef("disabled");
-    const body = {
-      model: modelRef,
-      parts: [{
-        type: "text",
-        text: buildMonthlyFleetingReviewPrompt({ month, markdown })
-      }]
-    };
-    if (OPENCODE_AGENT) body.agent = OPENCODE_AGENT;
-    await openCodeFetch(`/session/${encodeURIComponent(session.id)}/message`, {
-      method: "POST",
-      body
-    });
-    const answer = await waitForOpenCodeFinalAnswer(session.id);
-    return parseStructuredNoteResponse(answer);
-  } finally {
-    await deleteOpenCodeHelperSession(session);
-  }
+  const data = await hermesFetch("/chat/completions", {
+    method: "POST",
+    body: {
+      model: HERMES_REGULAR_MODEL,
+      stream: false,
+      messages: [{ role: "user", content: buildMonthlyFleetingReviewPrompt({ month, markdown }) }]
+    }
+  });
+  return parseStructuredNoteResponse(extractOpenAiCompatibleText(data));
 }
 
 async function callDeepSeekTodoExtraction({ text }) {
@@ -2766,7 +2897,7 @@ async function getUniqueStructuredNotePath(fileName) {
 
 function formatStructuredNoteSource(source) {
   if (!source) return "";
-  return source.startsWith("opencode:") ? source : `[[${source}]]`;
+  return `[[${source}]]`;
 }
 
 function normalizeMonthlyFleetingReview(note = {}, { month }) {
@@ -2837,7 +2968,7 @@ function normalizeMonthInput(value) {
   return month;
 }
 
-function buildOpenCodePrompt({ message, skill, people, files, deepWork }) {
+function buildSelectedContextPrompt({ message, skill, people, files, deepWork }) {
   const contextBlocks = [];
   if (deepWork?.enabled) {
     contextBlocks.push([
@@ -2857,7 +2988,7 @@ function buildOpenCodePrompt({ message, skill, people, files, deepWork }) {
       "Selected people context:",
       people.map((person) => [
         `${person.title || person.name} (${person.path}):`,
-        person.content
+        clipText(person.content, CHAT_SELECTED_CONTEXT_ENTRY_LIMIT)
       ].join("\n")).join("\n\n")
     ].join("\n"));
   }
@@ -2866,7 +2997,7 @@ function buildOpenCodePrompt({ message, skill, people, files, deepWork }) {
       "Selected file context:",
       files.map((file) => [
         `${file.title} (${file.path}):`,
-        file.content || file.snippet || ""
+        clipText(file.content || file.snippet || "", CHAT_SELECTED_CONTEXT_ENTRY_LIMIT)
       ].join("\n")).join("\n\n")
     ].join("\n"));
   }
@@ -2881,91 +3012,176 @@ function buildOpenCodePrompt({ message, skill, people, files, deepWork }) {
   ].join("\n");
 }
 
-async function waitForOpenCodeFinalAnswer(sessionId) {
-  const startedAt = Date.now();
-  let lastError = null;
-  while (Date.now() - startedAt <= OPENCODE_FINAL_TIMEOUT_MS) {
-    try {
-      const messages = await openCodeFetch(`/session/${encodeURIComponent(sessionId)}/message`);
-      const finalAnswer = extractLatestOpenCodeFinalAnswer(messages);
-      if (finalAnswer) return finalAnswer;
-    } catch (error) {
-      lastError = error;
-    }
-    await delay(OPENCODE_FINAL_POLL_MS);
-  }
-  if (lastError) throw lastError;
-  throw httpError(504, "OpenCode response timed out before a completed answer was available.");
-}
-
-function getOpenCodeMessageRole(item = {}) {
-  const role = String(item.info?.role || item.info?.type || item.role || item.type || "").toLowerCase();
-  return role.includes("assistant") ? "assistant" : "user";
-}
-
-function extractOpenCodeText(item = {}) {
-  const parts = Array.isArray(item.parts) ? item.parts : [];
-  return parts
-    .filter((part) => isDisplayableOpenCodeTextPart(part))
-    .map((part) => part.text || part.content || "")
-    .filter(Boolean)
-    .join("\n")
-    .trim();
-}
-
-function extractLatestOpenCodeFinalAnswer(messages) {
-  if (!Array.isArray(messages)) return "";
-  for (const message of messages.slice().reverse()) {
-    if (getOpenCodeMessageRole(message) !== "assistant") continue;
-    if (!isCompletedOpenCodeFinalMessage(message)) continue;
-    const content = extractOpenCodeText(message);
-    if (content) return content;
-  }
-  return "";
-}
-
-function isCompletedOpenCodeFinalMessage(message = {}) {
-  const finish = String(message.info?.finish || message.finish || "").toLowerCase();
-  if (finish && !["stop", "end_turn", "complete", "completed"].includes(finish)) return false;
-  const completedAt = message.info?.time?.completed || message.time?.completed || message.completed;
-  return Boolean(completedAt || finish === "stop");
-}
-
-function isDisplayableOpenCodeTextPart(part = {}) {
-  const type = String(part.type || "").toLowerCase();
-  if (type !== "text") return false;
-  const label = String(part.name || part.kind || part.role || part.label || "").toLowerCase();
-  return !/(reason|thought|thinking)/.test(label);
-}
-
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function openCodeFetch(endpoint, { method = "GET", body = null } = {}) {
-  const headers = { "Accept": "application/json" };
-  if (body !== null) headers["Content-Type"] = "application/json";
-  if (OPENCODE_SERVER_PASSWORD) {
-    headers.Authorization = `Basic ${Buffer.from(`${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}`).toString("base64")}`;
-  }
+async function readHermesModels() {
+  const data = await hermesFetch("/models");
+  const list = Array.isArray(data) ? data : data.data || data.models || [];
+  return list
+    .map((model) => {
+      const id = String(model.id || model.name || model.model || "").trim();
+      if (!id) return null;
+      return {
+        id,
+        name: model.name || id
+      };
+    })
+    .filter(Boolean);
+}
 
+function getHermesApiUrl(endpoint = "") {
+  return `${HERMES_BASE_URL}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
+}
+
+function getHermesHealthUrl() {
+  try {
+    const url = new URL(HERMES_BASE_URL);
+    url.pathname = url.pathname.replace(/\/v1\/?$/, "") || "/";
+    url.search = "";
+    url.hash = "";
+    return `${url.toString().replace(/\/+$/, "")}/health`;
+  } catch {
+    return HERMES_BASE_URL.replace(/\/v1\/?$/, "").replace(/\/+$/, "") + "/health";
+  }
+}
+
+function getHermesHeaders({ hasBody = false } = {}) {
+  const headers = { "Accept": "application/json" };
+  if (hasBody) headers["Content-Type"] = "application/json";
+  if (HERMES_API_KEY) headers.Authorization = `Bearer ${HERMES_API_KEY}`;
+  return headers;
+}
+
+async function hermesFetch(endpoint, { method = "GET", body = null, timeoutMs = HERMES_REQUEST_TIMEOUT_MS } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
-    response = await fetch(`${OPENCODE_BASE_URL}${endpoint}`, {
+    response = await fetch(getHermesApiUrl(endpoint), {
       method,
-      headers,
-      body: body === null ? undefined : JSON.stringify(body)
+      headers: getHermesHeaders({ hasBody: body !== null }),
+      body: body === null ? undefined : JSON.stringify(body),
+      signal: controller.signal
     });
-  } catch {
-    throw httpError(503, `OpenCode server is not reachable at ${OPENCODE_BASE_URL}. Start opencode serve and try again.`);
+  } catch (error) {
+    const detail = error.name === "AbortError"
+      ? "Hermes request timed out"
+      : `Hermes server is not reachable at ${HERMES_BASE_URL}. Start hermes gateway run and try again.`;
+    throw httpError(error.name === "AbortError" ? 504 : 503, detail);
+  } finally {
+    clearTimeout(timer);
   }
 
   if (response.status === 204) return {};
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw httpError(response.status, data.error?.message || data.message || `OpenCode request failed: ${method} ${endpoint}`);
+    throw httpError(response.status, data.error?.message || data.message || `Hermes request failed: ${method} ${endpoint}`);
   }
   return data;
+}
+
+async function hermesFetchStream(endpoint, { method = "POST", body = null, timeoutMs = HERMES_REQUEST_TIMEOUT_MS, onDelta = () => {} } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(getHermesApiUrl(endpoint), {
+      method,
+      headers: getHermesHeaders({ hasBody: body !== null }),
+      body: body === null ? undefined : JSON.stringify(body),
+      signal: controller.signal
+    });
+  } catch (error) {
+    const detail = error.name === "AbortError"
+      ? "Hermes chat request timed out"
+      : `Hermes server is not reachable at ${HERMES_BASE_URL}. Start hermes gateway run and try again.`;
+    throw httpError(error.name === "AbortError" ? 504 : 503, detail);
+  }
+
+  try {
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw httpError(response.status, data.error?.message || data.message || `Hermes request failed: ${method} ${endpoint}`);
+    }
+    if (!response.body) {
+      const data = await response.json().catch(() => ({}));
+      const answer = extractOpenAiCompatibleText(data);
+      if (answer) onDelta(answer);
+      return { answer };
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let answer = "";
+    const consumeLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      const payload = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
+      if (!payload || payload === "[DONE]") return;
+      let data;
+      try {
+        data = JSON.parse(payload);
+      } catch {
+        return;
+      }
+      const delta = extractOpenAiCompatibleDelta(data);
+      if (!delta) return;
+      answer += delta;
+      onDelta(delta);
+    };
+
+    const flushBuffer = (force = false) => {
+      const lines = buffer.split(/\r?\n/);
+      if (force) {
+        buffer = "";
+        for (const line of lines) consumeLine(line);
+        return;
+      }
+      buffer = lines.pop() || "";
+      for (const line of lines) consumeLine(line);
+    };
+
+    if (typeof response.body.getReader === "function") {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        flushBuffer();
+      }
+    } else {
+      for await (const chunk of response.body) {
+        buffer += decoder.decode(chunk, { stream: true });
+        flushBuffer();
+      }
+    }
+    buffer += decoder.decode();
+    flushBuffer(true);
+    return { answer: answer.trim() };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function extractOpenAiCompatibleDelta(data) {
+  return (data?.choices || [])
+    .map((choice) => {
+      const content = choice.delta?.content ?? choice.message?.content ?? choice.text ?? "";
+      if (Array.isArray(content)) {
+        return content.map((part) => part.text || part.content || "").join("");
+      }
+      return String(content || "");
+    })
+    .filter(Boolean)
+    .join("");
+}
+
+function logSlowHermesChat({ started, model, streamed }) {
+  const elapsed = Date.now() - started;
+  if (elapsed < HERMES_CHAT_SLOW_LOG_MS) return;
+  console.warn(`Hermes chat ${streamed ? "stream" : "request"} took ${elapsed}ms with model ${model}.`);
 }
 
 async function appendChatSessionExchange({ sessionPath, message, response, mentor, assistant, people, sources }) {
@@ -3010,7 +3226,7 @@ async function appendDeepWorkExchange({ deepWork, chatSession, message, response
   const now = new Date();
   const markdown = await fs.readFile(filePath, "utf8");
   const contextLines = [
-    chatSession?.path ? `chat_session:: ${chatSession.path.startsWith("opencode:") ? chatSession.path : `[[${chatSession.path}|${chatSession.title || "chat session"}]]`}` : "",
+    chatSession?.path ? `chat_session:: [[${chatSession.path}|${chatSession.title || "chat session"}]]` : "",
     skill ? `skill:: [[${skill.path}|${skill.title || skill.name || "skill"}]]` : "",
     mentor ? `mentor:: [[${mentor.path}|${mentor.title || mentor.name || "mentor"}]]` : "",
     assistant ? `assistant:: [[${assistant.path}|${assistant.title || assistant.name || "assistant"}]]` : "",
@@ -3111,7 +3327,7 @@ function parseChatReferences(message, body = {}) {
   const text = String(message || "");
   const mentor = firstLookupName([
     body?.mentor,
-    ...(isOpenCodeChatProvider() ? [] : Array.from(text.matchAll(/(?:^|\s)#([A-Za-z0-9_-]+)/g), (match) => match[1]))
+    ...(isVaultAgentChatProvider() ? [] : Array.from(text.matchAll(/(?:^|\s)#([A-Za-z0-9_-]+)/g), (match) => match[1]))
   ]);
   const skill = firstReferenceInput([
     body?.skill,
@@ -3121,7 +3337,7 @@ function parseChatReferences(message, body = {}) {
   const assistant = skill;
   const files = uniqueReferenceInputs([
     ...(Array.isArray(body?.files) ? body.files : []),
-    ...(isOpenCodeChatProvider() ? Array.from(text.matchAll(/(?:^|\s)#([A-Za-z0-9_-]+)/g), (match) => match[1]) : [])
+    ...(isVaultAgentChatProvider() ? Array.from(text.matchAll(/(?:^|\s)#([A-Za-z0-9_-]+)/g), (match) => match[1]) : [])
   ]);
   const people = uniqueReferenceInputs([
     ...(Array.isArray(body?.people) ? body.people : []),
@@ -3610,7 +3826,6 @@ async function getChatSkills(query = "") {
   const cleanQuery = normalizeLookupName(query);
   const rows = mergeSkillRows(
     await readVaultSkills(),
-    isOpenCodeChatProvider() ? await readOpenCodeSkills().catch(() => []) : [],
     await getReferenceRows("skill")
   );
   const suggestions = rows
@@ -3689,19 +3904,6 @@ function mergeSkillRows(...skillGroups) {
     }
   }
   return merged;
-}
-
-async function readOpenCodeSkills() {
-  const data = await openCodeFetch("/skill");
-  const list = Array.isArray(data) ? data : data.skills || data.all || [];
-  return list.map((skill) => ({
-    id: skill.id || skill.name,
-    kind: "skill",
-    title: skill.title || skill.name,
-    name: skill.name || skill.title,
-    path: skill.path || "",
-    description: skill.description || ""
-  }));
 }
 
 async function getVaultFileSuggestions(query = "") {
@@ -4151,6 +4353,29 @@ function extractDeepSeekText(data) {
     .trim();
 }
 
+function extractOpenAiCompatibleText(data) {
+  if (typeof data?.output_text === "string") return data.output_text.trim();
+  const choicesText = (data?.choices || [])
+    .map((choice) => {
+      const content = choice.message?.content ?? choice.delta?.content ?? choice.text ?? "";
+      if (Array.isArray(content)) {
+        return content.map((part) => part.text || part.content || "").join("");
+      }
+      return String(content || "");
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (choicesText) return choicesText;
+  const outputText = (data?.output || [])
+    .flatMap((item) => Array.isArray(item.content) ? item.content : [item])
+    .map((part) => part.text || part.content || "")
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  return outputText;
+}
+
 function formatChatSource(source) {
   return {
     id: source.note_id,
@@ -4236,7 +4461,7 @@ async function getHabitDashboard() {
     const identity = extractOkrIdentity(okrBody);
     const quarterRange = getOkrQuarterRange(okrMeta, sprintMeta);
     const habitKrs = okrMeta.keyResults.filter((kr) => isTrackedHabitKr(kr));
-    const today = formatDate(new Date());
+    const today = getTodayIsoDate();
     const currentWeekStart = getIsoWeekStart(today);
     const currentWeekEnd = addDaysToIsoDate(currentWeekStart, 6);
     const items = [];
@@ -4368,7 +4593,7 @@ async function getPersonalSystemDashboard() {
 
   const { frontmatter } = splitFrontmatter(markdown);
   const metadata = parseFrontmatter(frontmatter);
-  const today = formatDate(new Date());
+  const today = getTodayIsoDate();
   const items = checklistItems.map((item) => {
     const lastRun = normalizeIsoDate(metadata[item.key]);
     const daysSinceRun = lastRun ? daysBetweenIsoDates(lastRun, today) : null;
@@ -4414,7 +4639,7 @@ async function getPersonalSprint(view = "") {
     sprintStart: sprintMeta.sprintStart,
     sprintEnd: sprintMeta.sprintEnd
   });
-  const today = formatDate(new Date());
+  const today = getTodayIsoDate();
   const currentWeekStart = getIsoWeekStart(today);
   const currentWeekEnd = addDaysToIsoDate(currentWeekStart, 6);
   const isStale = Boolean(sprintMeta.sprintEnd && today > sprintMeta.sprintEnd);
@@ -4504,7 +4729,7 @@ async function updatePersonalSprintDailyFocus(body = {}) {
   const filePath = resolveVaultRelativePath(selectedSprint.path);
   const markdown = await fs.readFile(filePath, "utf8");
   const { frontmatter, body: markdownBody } = splitFrontmatter(markdown);
-  const today = formatDate(new Date());
+  const today = getTodayIsoDate();
   const nextBody = updateDailyFocusMarkdown(markdownBody, {
     date: today,
     text,
@@ -4525,7 +4750,7 @@ async function resolvePersonalSprintStatePath(view = "") {
     };
   }
 
-  const today = formatDate(new Date());
+  const today = getTodayIsoDate();
   const candidates = await discoverPersonalSprintStateFiles();
   if (!candidates.length) {
     throw httpError(404, `No personal sprint files found under ${PERSONAL_OKR_ROOT}.`);
@@ -5293,7 +5518,7 @@ async function countSprintActivities({ activities, sprintStart, sprintEnd }) {
   const result = {};
   for (const activity of activities) result[activity] = { sprintCount: 0, weekCount: 0, weekCounts: {} };
   if (!activities.length || !sprintStart || !sprintEnd) return result;
-  const currentWeekStart = getIsoWeekStart(formatDate(new Date()));
+  const currentWeekStart = getIsoWeekStart(getTodayIsoDate());
   const currentWeekEnd = addDaysToIsoDate(currentWeekStart, 6);
   for (const month of getMonthSlugsBetween(sprintStart, sprintEnd)) {
     const relativePath = `2.Areas/Personal/fleeting/${month}.md`;
@@ -5455,7 +5680,7 @@ async function toggleTask(body) {
   lines[lineIndex] = `${match[1]}${marker}${match[3]}`;
 
   await fs.writeFile(filePath, joinMarkdownLines(lines, newline), "utf8");
-  await runVaultIndex({ reason: "task-toggle" });
+  await reindexMarkdownFile(filePath, { reason: "task-toggle" });
 
   return {
     ok: true,
@@ -5483,7 +5708,7 @@ async function triageTask(body) {
   lines[lineIndex] = applyTodoMetadataToLine(line, metadata);
 
   await fs.writeFile(filePath, joinMarkdownLines(lines, newline), "utf8");
-  await runVaultIndex({ reason: "task-triage" });
+  await reindexMarkdownFile(filePath, { reason: "task-triage" });
 
   return {
     ok: true,
@@ -5512,7 +5737,7 @@ async function updateTask(body) {
   lines.splice(lineIndex, 1, ...replacement);
 
   await fs.writeFile(filePath, joinMarkdownLines(lines, newline), "utf8");
-  await runVaultIndex({ reason: "task-update" });
+  await reindexMarkdownFile(filePath, { reason: "task-update" });
 
   return {
     ok: true,
@@ -6117,6 +6342,11 @@ function getCurrentMonthSlug(date = new Date()) {
   return `${year}-${month}`;
 }
 
+function getTodayIsoDate() {
+  const override = normalizeIsoDate(process.env.APP_DATE_OVERRIDE || "");
+  return override || formatDate(new Date());
+}
+
 function formatDayHeading(date) {
   return `## ${formatDate(date)}`;
 }
@@ -6175,6 +6405,7 @@ async function appendCapture(body) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const existing = await readFileIfExists(filePath);
   await fs.writeFile(filePath, appendToDaySection(existing, dayHeading, entry), "utf8");
+  await reindexMarkdownFile(filePath, { reason: "capture-append" });
 
   return {
     id: `${date.getTime()}-${category}`,
@@ -6206,7 +6437,7 @@ async function updateCapture(body) {
   lines.splice(startIndex, contentLines.length, ...replacement);
 
   await fs.writeFile(filePath, joinMarkdownLines(lines, newline), "utf8");
-  await runVaultIndex({ reason: "capture-update" });
+  await reindexMarkdownFile(filePath, { reason: "capture-update" });
 
   return {
     ok: true,
@@ -6282,7 +6513,6 @@ function formatCaptureEntry({ date, category, text, todo = null, source = "" }) 
 function normalizeCaptureSource(value) {
   const normalized = String(value || "").trim().replaceAll("\\", "/").replace(/^\/+/, "");
   if (!normalized) return "";
-  if (normalized.startsWith("opencode:")) return normalized;
   if (!normalized.endsWith(".md")) throw httpError(400, "Capture source must be a Markdown file.");
   if (!normalized.startsWith(`${CHAT_SESSIONS_DIR}/`)) throw httpError(400, "Capture source must be a chat session.");
   return normalized;
@@ -6290,9 +6520,7 @@ function normalizeCaptureSource(value) {
 
 function formatCaptureSourceField(source) {
   if (!source) return "";
-  return source.startsWith("opencode:")
-    ? `[source:: ${source}]`
-    : `[source:: [[${source}]]]`;
+  return `[source:: [[${source}]]]`;
 }
 
 function normalizeTodoCaptureMetadata(body) {

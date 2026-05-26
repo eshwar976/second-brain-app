@@ -35,7 +35,7 @@ For always-on Mac mini use, install the native `launchd` service:
 npm run service:install
 ```
 
-This starts the web app and, by default, starts OpenCode HTTP from the configured vault path.
+This starts the web app and, by default, starts Hermes HTTP from the configured vault path.
 
 Useful commands:
 
@@ -78,10 +78,23 @@ VAULT_PATH=/Users/vamshi/Documents/obsidian/obsidian-personal
 HOST=127.0.0.1
 PORT=3030
 WATCH_DEBOUNCE_MS=1200
+ICLOUD_WATCH_DEBOUNCE_MS=15000
+ICLOUD_STARTUP_INDEX_DELAY_MS=30000
+ICLOUD_READ_RETRY_COUNT=3
+MAX_INDEX_READ_ERROR_LOGS=10
 AUTO_INDEX_ON_START=true
+VAULT_WATCH_ENABLED=false
+NIGHTLY_INDEX_ENABLED=true
+NIGHTLY_INDEX_HOUR=3
+NIGHTLY_INDEX_MINUTE=15
 APP_SECRET=
 INDEX_IGNORE=
 INDEX_IGNORE_FILE=.second-brain-ignore
+CHAT_PROVIDER=hermes
+HERMES_BASE_URL=http://127.0.0.1:8642/v1
+HERMES_AUTO_START=true
+HERMES_REGULAR_MODEL=deepseek-v4-flash
+HERMES_THINKING_MODEL=deepseek-v4-pro
 DEEPSEEK_API_KEY=
 DEEPSEEK_REGULAR_MODEL=deepseek-v4-flash
 DEEPSEEK_THINKING_MODEL=deepseek-v4-pro
@@ -133,13 +146,13 @@ With both GitHub OAuth and `APP_SECRET` configured:
 
 - `https://secondbrain.vamshisasi.com` uses GitHub login.
 - `http://192.168.68.5:3030` uses the app passcode.
-- OpenCode should stay bound to `127.0.0.1:4096`.
+- Hermes should stay bound to `127.0.0.1:8642`; the webapp remains the LAN-facing surface.
 
-Set `DEEPSEEK_API_KEY` to enable Chat. Chat retrieves a small set of indexed vault snippets and sends those snippets, the current question, and short browser-session history to the DeepSeek API.
+Set `CHAT_PROVIDER=hermes` to use the local Hermes gateway for Chat. Hermes is called through its OpenAI-compatible HTTP API at `HERMES_BASE_URL`, while the webapp still handles auth, sessions, capture, tasks, Sprint, Dashboard, and MCP.
 
 Chat sessions are saved as Markdown under `CHAT_SESSIONS_DIR`, which defaults to `3.Resources/gpt/sessions`. The browser remembers the active session path and reloads it after refresh.
 
-`DEEPSEEK_REGULAR_MODEL` defaults to `deepseek-v4-flash`, which is the right default for fast daily PKM chat. `DEEPSEEK_THINKING_MODEL` defaults to `deepseek-v4-pro` for harder synthesis, project planning, coding architecture, or quality-sensitive Deep Work sessions. The Chat tab has a Thinking toggle; off sends regular Flash requests with `thinking: disabled`, while on switches to Pro and sends `thinking: enabled` with `DEEPSEEK_REASONING_EFFORT` (`high` or `max`).
+`HERMES_REGULAR_MODEL` defaults to `deepseek-v4-flash`, which is the right default for fast daily PKM chat. `HERMES_THINKING_MODEL` defaults to `deepseek-v4-pro` for harder synthesis, project planning, coding architecture, or quality-sensitive Deep Work sessions. The Chat tab has a Thinking toggle; off uses the regular model and on switches to the thinking model.
 
 `DEEPSEEK_TRAINING_OPT_OUT=true` sends a best-effort `opt_out: training` request header. This is included as a privacy preference header, but confirm current DeepSeek policy/docs for any contractual training guarantees.
 
@@ -153,6 +166,21 @@ Use either:
 - or copy `.second-brain-ignore.example` to `.second-brain-ignore` and add one vault-relative path per line.
 
 Simple `*` wildcards are supported. Ignored paths are excluded from task lists and task/dashboard counts only; chat and file search can still use the full vault.
+
+## iCloud Vault Notes
+
+iCloud vault paths are supported, but iCloud can temporarily make Markdown files unreadable while it hydrates or reconciles them. In that case macOS may surface `Unknown system error -11`.
+
+The app treats this as an iCloud availability issue:
+
+- it keeps the last good SQLite index instead of replacing it with a partial or empty index
+- for iCloud live vaults, set `VAULT_WATCH_ENABLED=false` and `AUTO_INDEX_ON_START=false`
+- the app can use `NIGHTLY_INDEX_ENABLED=true` to rebuild once overnight instead of scanning during the day
+- webapp writes reindex only the touched Markdown file, so capture/todo edits update without a full vault scan
+- index reads use `ICLOUD_READ_RETRY_COUNT` before treating a file as temporarily unavailable
+- manual `Rebuild index` is safe; if iCloud is mid-sync, the previous good index remains active
+
+Hermes still runs from the vault path and can read the live Markdown vault directly. When `HYDRATE_VAULT_ON_START=true`, the launchd runner asks iCloud to download Hermes skill paths, including `.agents/skills`, and then pre-reads them before starting Hermes in the background. This helps iCloud materialize placeholder files so Hermes skill loading does not trip over transient `-11` reads, without blocking the webapp itself from starting.
 
 ## API
 

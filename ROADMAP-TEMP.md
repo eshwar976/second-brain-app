@@ -19,7 +19,7 @@ Status: Done.
 
 Done:
 - Verified sprint dynamic selection, Last/Current/Next selector, Obsidian note links, and service worker cache bumps.
-- Fixed OpenCode internal monologue leaks by waiting for completed OpenCode assistant responses.
+- Fixed agent internal monologue leaks by waiting for completed assistant responses.
 - Kept the chat typing indicator as the only pending generation state.
 - Ran baseline checks repeatedly:
   - `node --check server.js`
@@ -52,22 +52,21 @@ Left:
 - Optional: deeper offline/PWA behavior and queued writes.
 - Optional: broader manual mobile regression pass after every large UI change.
 
-## Phase 3: Chat / OpenCode Integration
+## Phase 3: Chat / Hermes Integration
 
 Status: Done for current design.
 
 Done:
-- Switched chat runtime to OpenCode.
-- Uses OpenCode sessions endpoint for chat sessions.
-- Uses OpenCode models endpoint/model config with regular and thinking modes.
+- Switched chat runtime to Hermes.
+- Uses vault-native Markdown session files for chat sessions.
+- Uses Hermes model config with regular and thinking modes.
 - Thinking toggle maps to the configured thinking model.
-- Uses `.opencode/agents/secondbrain.md` as the primary agent prompt.
 - Removed app-injected generic PKM prompt.
 - Supports `/skill`, `@person`, and `#file` context selection.
 - Sends full selected skill/person/file context from the vault where relevant.
-- Session sidebar with search/rename/delete behavior aligned to OpenCode where available.
+- Session sidebar with search/rename/delete behavior.
 - New chat behavior favors a fresh session unless a recent session is still active.
-- OpenCode health/status surfaced in settings/dashboard area.
+- Hermes health/status surfaced in settings/dashboard area.
 
 Left:
 - Optional: richer session grouping/search later.
@@ -143,7 +142,7 @@ Done:
 - Added pinned/favorite context chips.
 - Added suggested context hide/dismiss controls.
 - Added Deep Work suggestion bias toward active Deep Work log and current sprint.
-- Added intent-aware context ranking for common OpenCode chat prompts:
+- Added intent-aware context ranking for common chat prompts:
   - personal/career scope
   - OKRs and sprints
   - Deep Work sessions
@@ -162,8 +161,8 @@ Done:
   - Unpin
   - Remove
   - Dismiss
-- Refined `.opencode/agents/secondbrain.md` retrieval rules.
-- Confirmed no OpenCode monologue leak remains.
+- Refined Hermes retrieval/context handoff rules.
+- Confirmed no agent monologue leak remains.
 
 Left:
 - Optional: favorite management UI beyond pin/unpin inside drawer.
@@ -183,22 +182,22 @@ Done:
 - Monthly reviews are written as separate drafts under `3.Resources/gpt/reviews/fleeting` without changing the raw fleeting log.
 
 Left:
-- Changelog update workflow via skills.
-- About-me update workflow via skills.
+- Wire explicit UI/automation entrypoints for about-me/changelog maintenance if still desired.
+- Decide which Hermes maintenance workflows should be scheduled versus run on demand.
 
 Recommended order:
 1. Chat to fleeting summary with session link.
 2. Chat to todo extraction.
 3. Chat to structured note generation.
 4. Monthly fleeting review.
-5. Changelog/about-me maintenance workflows.
+5. Hermes skill-based maintenance workflows.
 
 ## Phase 6: Packaging / Maintenance
 
 Status: In progress.
 
 Planned:
-- Mac mini launch setup. Done: added native `launchd` scripts and docs; install is manual via `npm run service:install`. The web app service now starts vault-native OpenCode HTTP alongside the app.
+- Mac mini launch setup. Done: added native `launchd` scripts and docs; install is manual via `npm run service:install`. The web app service now starts vault-native Hermes HTTP alongside the app.
 - Durable local startup instructions. Done: README, `docs/mac-mini-service.md`, and `docs/operations-runbook.md`.
 - Operational safety/status visibility. Done: Dashboard Settings shows runtime, index watcher, chat runtime, service commands, git dirty state, vault path, and auth/LAN state.
 - Backup hygiene and dirty-state visibility. Done: Settings shows app/vault git state, `docs/maintenance-checklist.md` documents expected hygiene, and `npm run doctor` checks the local operating shape.
@@ -207,6 +206,7 @@ Planned:
 - Rename / branding decision. Deferred per user request.
 - Docker build. Ignored/deferred per user request.
 - MCP server. Done for a narrow LAN/internal first pass; future architecture, tools, and security plan captured in `docs/mcp-future-plan.md`.
+- Hermes vault-maintenance skill contracts. Done: updated `personal-manager` with automation-safe Mode 8, updated `about-me-curator` with automation-safe Mode 4, added `llm-wiki-curator`, added `vault-maintenance-runner`, and created `3.Resources/gpt/automation-log.md`.
 
 ## Future Feature Enhancement: MCP Server
 
@@ -236,7 +236,7 @@ Future architecture:
 - Reuse existing app operations instead of duplicating Markdown parsing/writing logic.
 - Move capability implementations behind `executeCapability()` into service modules such as capture, tasks, sprint, dashboard, vault search, chat, and audit services.
 - Keep MCP as a transport adapter, not a second app brain.
-- Keep OpenCode as the chat runtime unless a future assistant gateway deliberately changes that boundary.
+- Keep Hermes as the chat runtime unless a future assistant gateway deliberately changes that boundary.
 
 Future tools:
 - Task metadata update and weekly sprint checkbox tools.
@@ -255,21 +255,28 @@ Security considerations:
 - The smart speaker should use high-level tools such as quick capture, create todo, today focus, sprint status, and chat, not raw vault access.
 - Future clients should get separate tokens and separate tool allowlists.
 - GitHub OAuth remains browser auth only; MCP should not depend on browser sessions.
-- Do not expose raw OpenCode control or shell access through MCP.
+- Do not expose raw agent control or shell access through MCP.
 
 Reference plan:
 - `docs/mcp-future-plan.md`
 
 ## Future Feature Enhancement: Hermes + LLM Wiki
 
-Status: Planned.
+Status: Scaffolded / in progress.
 
 Plan:
-- Evaluate Hermes as the future chat/workflow runtime before removing OpenCode.
+- Use Hermes as the chat/workflow runtime.
 - Add an LLM Wiki as a derived compiled-knowledge layer inside the same vault.
 - Keep raw capture, sources, OKRs, sprints, habits, and tasks as source-of-truth.
-- Use Obsidian Web Clipper and other tools as raw source intake into `3.Resources/Sources`.
+- Use Obsidian Web Clipper as the preferred raw web-source intake path into `3.Resources/Sources/web/inbox`.
+- Keep clipped source notes as evidence; Hermes synthesizes them into `3.Resources/llm-wiki` only through approved ingest workflows.
 - Use Hermes to ingest sources and maintain `3.Resources/llm-wiki`.
+- New vault skills:
+  - `llm-wiki-curator`
+  - `vault-maintenance-runner`
+- Existing vault skills now prepared for Hermes maintenance:
+  - `personal-manager` Mode 8
+  - `about-me-curator` Mode 4
 
 Reference plan:
 - `docs/hermes-llm-wiki-plan.md`
@@ -280,7 +287,7 @@ Flowise rename:
 
 ## Current Assumptions
 
-- OpenCode remains the chat runtime.
+- Hermes remains the chat runtime.
 - Markdown remains the source of truth.
 - SQLite remains a cache/index for operations, not the chat brain.
 - Personal sprint/OKR remains the Sprint tab v1 scope.

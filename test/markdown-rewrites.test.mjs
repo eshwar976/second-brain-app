@@ -476,7 +476,8 @@ test("personal sprint reads OKRs, counts activity logs, and updates weekly check
         DATA_DIR: appDataPath,
         INDEX_IGNORE_FILE: path.join(appDataPath, ".second-brain-ignore"),
         PERSONAL_OKR_ROOT: "2.Areas/Personal/OKRs",
-        PERSONAL_SPRINT_STATE_PATH: ""
+        PERSONAL_SPRINT_STATE_PATH: "",
+        APP_DATE_OVERRIDE: "2026-05-20"
       },
       stdio: ["ignore", "pipe", "pipe"]
     });

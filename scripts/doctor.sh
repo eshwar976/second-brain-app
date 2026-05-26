@@ -5,7 +5,7 @@ APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ENV_FILE="$APP_DIR/.env"
 APP_LABEL="com.vamshi.second-brain-app"
 APP_PORT="3030"
-OPENCODE_PORT="4096"
+HERMES_PORT="8642"
 FAILURES=0
 WARNINGS=0
 
@@ -79,9 +79,10 @@ VAULT_PATH_VALUE="$(env_value VAULT_PATH "")"
 HOST_VALUE="$(env_value HOST "127.0.0.1")"
 PORT_VALUE="$(env_value PORT "3030")"
 APP_PORT="$PORT_VALUE"
-OPENCODE_BASE_URL="$(env_value OPENCODE_BASE_URL "http://127.0.0.1:4096")"
-OPENCODE_AUTO_START="$(env_value OPENCODE_AUTO_START "true")"
-OPENCODE_PORT="$(env_value OPENCODE_PORT "4096")"
+CHAT_PROVIDER_VALUE="$(env_value CHAT_PROVIDER "hermes")"
+HERMES_BASE_URL="$(env_value HERMES_BASE_URL "http://127.0.0.1:8642/v1")"
+HERMES_AUTO_START="$(env_value HERMES_AUTO_START "true")"
+HERMES_PORT="$(env_value HERMES_PORT "8642")"
 MCP_ENABLED_VALUE="$(env_value MCP_ENABLED "false")"
 MCP_HOST_VALUE="$(env_value MCP_HOST "127.0.0.1")"
 MCP_PORT_VALUE="$(env_value MCP_PORT "3031")"
@@ -103,16 +104,21 @@ else
   fail "VAULT_PATH missing or unreachable: ${VAULT_PATH_VALUE:-unset}"
 fi
 
-if [ "$OPENCODE_AUTO_START" = "false" ]; then
-  warn "OPENCODE_AUTO_START=false; OpenCode is manually managed"
-else
-  ok "OpenCode auto-start enabled"
-fi
+if [ "$CHAT_PROVIDER_VALUE" = "hermes" ]; then
+  ok "CHAT_PROVIDER=hermes"
+  if [ "$HERMES_AUTO_START" = "false" ]; then
+    warn "HERMES_AUTO_START=false; Hermes is manually managed"
+  else
+    ok "Hermes auto-start enabled"
+  fi
 
-case "$OPENCODE_BASE_URL" in
-  *":$OPENCODE_PORT"|*":$OPENCODE_PORT/"*) ok "OPENCODE_BASE_URL matches OPENCODE_PORT" ;;
-  *) warn "OPENCODE_BASE_URL ($OPENCODE_BASE_URL) may not match OPENCODE_PORT ($OPENCODE_PORT)" ;;
-esac
+  case "$HERMES_BASE_URL" in
+    *":$HERMES_PORT"* ) ok "HERMES_BASE_URL matches HERMES_PORT" ;;
+    *) warn "HERMES_BASE_URL ($HERMES_BASE_URL) may not match HERMES_PORT ($HERMES_PORT)" ;;
+  esac
+else
+  ok "Using direct DeepSeek provider"
+fi
 
 section "Auth"
 if [ -n "$APP_SECRET_VALUE" ]; then
@@ -186,7 +192,7 @@ else
 fi
 
 if [ -e "$VAULT_PATH_VALUE/package.json" ] || [ -d "$VAULT_PATH_VALUE/node_modules" ]; then
-  warn "Vault root contains app-like files; confirm they belong to vault-native OpenCode setup"
+  warn "Vault root contains app-like files; confirm they belong to vault-native agent setup"
 else
   ok "No obvious app runtime files at vault root"
 fi
@@ -210,12 +216,14 @@ else
   fail "Web app is not listening on port $APP_PORT"
 fi
 
-if [ "$OPENCODE_AUTO_START" = "false" ]; then
-  warn "Skipping OpenCode listener check because OPENCODE_AUTO_START=false"
-elif lsof -nP -iTCP:"$OPENCODE_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  ok "OpenCode is listening on port $OPENCODE_PORT"
-else
-  fail "OpenCode is not listening on port $OPENCODE_PORT"
+if [ "$CHAT_PROVIDER_VALUE" = "hermes" ]; then
+  if [ "$HERMES_AUTO_START" = "false" ]; then
+    warn "Skipping Hermes listener check because HERMES_AUTO_START=false"
+  elif lsof -nP -iTCP:"$HERMES_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+    ok "Hermes is listening on port $HERMES_PORT"
+  else
+    fail "Hermes is not listening on port $HERMES_PORT"
+  fi
 fi
 
 if [ "$MCP_ENABLED_VALUE" = "true" ]; then
@@ -226,13 +234,7 @@ if [ "$MCP_ENABLED_VALUE" = "true" ]; then
   fi
 fi
 
-section "Vault Native OpenCode"
-if [ -d "$VAULT_PATH_VALUE/.opencode/agents" ]; then
-  ok "Vault has .opencode/agents"
-else
-  warn "Vault is missing .opencode/agents"
-fi
-
+section "Vault Native Agents"
 if [ -d "$VAULT_PATH_VALUE/.agents/skills" ]; then
   ok "Vault has .agents/skills"
 else

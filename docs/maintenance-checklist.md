@@ -17,7 +17,7 @@ npm run doctor
    - Runtime is running and uptime looks recent.
    - Index watcher is `watching`.
    - Chat runtime is online.
-   - OpenCode service is running if `OPENCODE_AUTO_START=true`.
+   - Hermes service is running if `CHAT_PROVIDER=hermes` and `HERMES_AUTO_START=true`.
    - Vault and target file point to the expected Obsidian vault.
    - App Git and Vault Git are in a state you expect.
 
@@ -47,9 +47,9 @@ npm run service:logs
 
 ## If Chat Fails
 
-1. Confirm OpenCode is running.
+1. Confirm Hermes is running.
 2. Check Dashboard -> Settings -> Chat runtime.
-3. Confirm `OPENCODE_BASE_URL` matches `OPENCODE_HOST` and `OPENCODE_PORT`.
+3. Confirm `HERMES_BASE_URL` matches `HERMES_PORT`.
 4. Run:
 
 ```bash
@@ -58,7 +58,7 @@ npm run service:status
 npm run service:logs
 ```
 
-OpenCode should be running from `VAULT_PATH`, not the app repo, so it can load `.opencode/agents` and `.agents/skills`.
+Hermes should be running from `VAULT_PATH`, not the app repo, so it can load vault-native Markdown and `.agents/skills`.
 
 ## Backup Hygiene
 
@@ -73,7 +73,7 @@ OpenCode should be running from `VAULT_PATH`, not the app repo, so it can load `
 - Run `npm run doctor`.
 - Confirm capture writes still land in the current monthly fleeting note.
 - Confirm index watcher is healthy.
-- Confirm OpenCode is listening on `4096`.
+- Confirm Hermes is listening on `8642` when `CHAT_PROVIDER=hermes`.
 - Confirm GitHub auth still works.
 - Confirm public domain uses GitHub login and LAN IP uses app passcode if both auth methods are configured.
 - Review service logs for repeated startup errors.
@@ -86,4 +86,4 @@ OpenCode should be running from `VAULT_PATH`, not the app repo, so it can load `
 - Confirm `.env` is still private and recoverable from private backup.
 - Confirm `.data/` and logs are not committed.
 - Confirm Sprint/OKR tab resolves the current quarter/sprint.
-- Confirm OpenCode starts from the vault and can see `.opencode/agents` and `.agents/skills`.
+- Confirm Hermes starts from the vault and can see Markdown notes and `.agents/skills`.

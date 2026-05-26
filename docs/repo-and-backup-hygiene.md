@@ -19,7 +19,6 @@ The vault owns:
 
 - Markdown notes
 - Obsidian config
-- `.opencode/agents`
 - `.agents/skills`
 - chat/deep-work/generated notes that are intentionally written as Markdown
 

@@ -30,6 +30,7 @@ const PINNED_CONTEXT_STORAGE_KEY = "secondBrain.chat.pinnedContext";
 const CHAT_SUGGEST_DEBOUNCE_MS = 90;
 const CHAT_CONTEXT_SUGGEST_DEBOUNCE_MS = 420;
 const CHAT_AUTO_RESUME_MS = 30 * 60 * 1000;
+const CHAT_CLIENT_TIMEOUT_MS = 150000;
 const RECENT_CONTEXT_LIMIT = 6;
 const PINNED_CONTEXT_LIMIT = 8;
 const PULL_REFRESH_TRIGGER_PX = 72;
@@ -1960,7 +1961,7 @@ function upsertChatSession(session) {
 async function deleteChatSession(sessionPath) {
   const session = state.chatSessions.find((item) => item.path === sessionPath);
   const title = session?.title || "this chat";
-  if (!window.confirm(`Delete "${title}"? This removes the OpenCode session.`)) return;
+  if (!window.confirm(`Delete "${title}"? This removes the chat session.`)) return;
   try {
     await postJson("/api/chat/session/delete", { path: sessionPath });
     state.chatSessions = state.chatSessions.filter((item) => item.path !== sessionPath);
@@ -2598,7 +2599,7 @@ function renderContextDetailItem(item, source = "selected") {
       <div>
         <span>${escapeHtml(getChatContextPrefix(item.kind))} ${escapeHtml(kind)}</span>
         <strong>${escapeHtml(title)}</strong>
-        ${item.path ? `<small>${escapeHtml(item.path)}</small>` : `<small>OpenCode skill</small>`}
+        ${item.path ? `<small>${escapeHtml(item.path)}</small>` : `<small>Agent skill</small>`}
       </div>
       <div class="context-detail-actions">
         ${item.path ? `<button type="button" data-open-note="${escapeHtml(item.path)}">Open</button>` : ""}
@@ -2778,8 +2779,8 @@ function renderSettingsDetails(config) {
       <div><span>Write auth</span><strong>${config.authRequired ? "enabled" : "not set"}</strong></div>
       <div><span>Task ignores</span><strong>${numberFormat(ignoreCount)}</strong></div>
       <div class="${runtime.reachable ? "is-ok" : "is-warning"}"><span>${escapeHtml((config.chat?.provider || "chat").toUpperCase())}</span><strong>${escapeHtml(runtimeLabel)}</strong></div>
-      <div><span>OpenCode URL</span><strong>${escapeHtml(config.chat?.opencodeBaseUrl || "not used")}</strong></div>
-      <div><span>OpenCode agent</span><strong>${escapeHtml(config.chat?.agent || "not used")}</strong></div>
+      <div><span>Chat URL</span><strong>${escapeHtml(config.chat?.hermesBaseUrl || "not used")}</strong></div>
+      <div><span>Chat agent</span><strong>${escapeHtml(config.chat?.agent || (config.chat?.provider === "hermes" ? "Hermes gateway" : "not used"))}</strong></div>
       <div><span>Runtime detail</span><strong>${escapeHtml(runtimeDetail || "not checked")}</strong></div>
       <div><span>Started</span><strong>${escapeHtml(runtimeStarted)}</strong></div>
       <div><span>Node</span><strong>${escapeHtml(appRuntime.nodeVersion || "unknown")}</strong></div>
@@ -2789,9 +2790,9 @@ function renderSettingsDetails(config) {
       <div><span>Index size</span><strong>${numberFormat(index.noteCount)} notes · ${numberFormat(index.taskCount)} tasks</strong></div>
       <div><span>Watcher debounce</span><strong>${numberFormat(appRuntime.watchDebounceMs)}ms</strong></div>
       <div><span>Service</span><strong>${escapeHtml(service.label || "manual")}</strong></div>
-      <div><span>OpenCode service</span><strong>${escapeHtml(service.opencodeAutoStart ? (service.opencodeLabel || "enabled") : "manual")}</strong></div>
-      <div><span>OpenCode bind</span><strong>${escapeHtml(service.opencodeAutoStart ? `${service.opencodeHost || "127.0.0.1"}:${service.opencodePort || "4096"}` : "manual")}</strong></div>
-      <div><span>OpenCode cwd</span><strong>${escapeHtml(service.opencodeCwd || "vault path")}</strong></div>
+      <div><span>Hermes service</span><strong>${escapeHtml(service.hermesAutoStart ? (service.hermesLabel || "enabled") : "manual")}</strong></div>
+      <div><span>Hermes bind</span><strong>${escapeHtml(service.hermesAutoStart ? `${service.hermesHost || "127.0.0.1"}:${service.hermesPort || "8642"}` : "manual")}</strong></div>
+      <div><span>Agent cwd</span><strong>${escapeHtml(service.hermesCwd || "vault path")}</strong></div>
       <div class="${mcp.enabled ? "is-ok" : ""}"><span>MCP</span><strong>${escapeHtml(mcp.enabled ? `${mcp.host}:${mcp.port}` : "disabled")}</strong></div>
       <div><span>MCP tools</span><strong>${numberFormat((mcp.allowedTools || []).length)}</strong></div>
       <div><span>MCP client scopes</span><strong>${numberFormat((mcp.clientScopes || []).length)}</strong></div>
@@ -3055,7 +3056,7 @@ async function submitChat() {
     state.chatMessages.push(assistantMessage);
     renderChat();
 
-    const data = await postJson("/api/chat", {
+    const chatPayload = {
       message,
       history: payloadHistory,
       thinkingMode: state.chatThinkingMode,
@@ -3064,7 +3065,30 @@ async function submitChat() {
       skill: contextPayload.skill,
       people: contextPayload.people,
       files: contextPayload.files
-    });
+    };
+    let streamedAnswer = "";
+    const data = state.config?.chat?.provider === "hermes"
+      ? await postChatStream(chatPayload, {
+        onSession(session) {
+          state.chatSession = session || state.chatSession;
+          upsertChatSession(state.chatSession);
+          if (state.chatSession?.path) {
+            window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, state.chatSession.path);
+          }
+          renderChatSessionState();
+          updateChatMessage(assistantMessage.id, {
+            sessionPath: state.chatSession?.path || activeSessionPath
+          });
+        },
+        onDelta(delta) {
+          streamedAnswer += delta;
+          updateChatMessage(assistantMessage.id, {
+            content: streamedAnswer,
+            isPending: false
+          });
+        }
+      })
+      : await postJson("/api/chat", chatPayload);
     state.chatSession = data.session || state.chatSession;
     upsertChatSession(state.chatSession);
     if (state.chatSession?.path) {
@@ -3072,7 +3096,7 @@ async function submitChat() {
     }
     renderChatSessionState();
     updateChatMessage(assistantMessage.id, {
-      content: data.answer || "",
+      content: data.answer || streamedAnswer || "",
       sources: data.sources || [],
       mentor: data.mentor || null,
       assistant: data.assistant || null,
@@ -3120,9 +3144,7 @@ async function ensureChatSessionForSubmit(message, activeSessionPath) {
     const data = await protectedGetJson(`/api/chat/session?${params.toString()}`);
     return data.session || null;
   }
-  const payload = state.config?.chat?.provider === "opencode"
-    ? {}
-    : { title: deriveClientChatTitle(message) };
+  const payload = { title: deriveClientChatTitle(message) };
   const data = await postJson("/api/chat/session", payload);
   return data || null;
 }
@@ -5762,6 +5784,85 @@ async function postJson(url, payload) {
   return data;
 }
 
+async function postChatStream(payload, handlers = {}) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), CHAT_CLIENT_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch("/api/chat/stream", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: getWriteHeaders(),
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch (error) {
+    window.clearTimeout(timer);
+    throw new Error(error.name === "AbortError" ? "Hermes chat timed out." : "Chat request failed.");
+  }
+
+  try {
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      handleAuthError(response.status);
+      throw new Error(data.error || "Request failed.");
+    }
+    if (!response.body) {
+      const data = await response.json();
+      handlers.onDone?.(data);
+      return data;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let donePayload = null;
+    const consumeLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let event;
+      try {
+        event = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+      if (event.type === "session") {
+        handlers.onSession?.(event.session);
+      } else if (event.type === "delta") {
+        handlers.onDelta?.(event.delta || "");
+      } else if (event.type === "done") {
+        donePayload = event;
+        handlers.onDone?.(event);
+      } else if (event.type === "error") {
+        throw new Error(event.error || "Chat request failed.");
+      }
+    };
+    const flushBuffer = (force = false) => {
+      const lines = buffer.split(/\r?\n/);
+      if (force) {
+        buffer = "";
+        lines.forEach(consumeLine);
+        return;
+      }
+      buffer = lines.pop() || "";
+      lines.forEach(consumeLine);
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      flushBuffer();
+    }
+    buffer += decoder.decode();
+    flushBuffer(true);
+    if (!donePayload) throw new Error("Chat stream ended before Hermes returned a final response.");
+    return donePayload;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 function handleAuthError(status) {
   if (status !== 401) return;
   if (state.config?.githubAvailable) {
@@ -5848,6 +5949,11 @@ function formatWatcherStatus(watcher) {
   if (watcher.status === "watching" && watcher.pending) return "watching, indexing soon";
   if (watcher.status === "watching" && watcher.queued) return "watching, queued";
   if (watcher.status === "watching") return "watching";
+  if (watcher.status === "scheduled") return watcher.nextNightlyRunAt
+    ? `nightly index scheduled: ${formatDateTime(watcher.nextNightlyRunAt)}`
+    : "nightly index scheduled";
+  if (watcher.status === "disabled") return "disabled";
+  if (watcher.status === "stale") return `stale, using last good index: ${compactStatusText(watcher.lastError || "iCloud files are temporarily unavailable", 120)}`;
   if (watcher.status === "error") return `error: ${compactStatusText(watcher.lastError || "unknown", 120)}`;
   return watcher.status || "unavailable";
 }

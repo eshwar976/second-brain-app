@@ -87,7 +87,42 @@ npm run doctor
    - vault path
    - runtime status
    - index watcher
-   - OpenCode status
+   - chat runtime status
+
+## iCloud Vault Behavior
+
+The live vault may be in iCloud at a path like:
+
+```text
+/Users/vamshi/Library/Mobile Documents/iCloud~md~obsidian/Documents/obsidian-personal
+```
+
+iCloud can temporarily return `Unknown system error -11` while files hydrate, evict, or reconcile. This usually affects broad recursive reads, not individual files permanently.
+
+Expected app behavior:
+
+- the webapp keeps using the last good SQLite index
+- for an iCloud live vault, continuous watching is disabled with `VAULT_WATCH_ENABLED=false`
+- startup indexing is disabled with `AUTO_INDEX_ON_START=false`
+- nightly indexing is enabled with `NIGHTLY_INDEX_ENABLED=true`
+- Dashboard Settings should show a nightly scheduled index, not a stale watcher warning
+- manual `Rebuild index` may preserve the existing index if iCloud is mid-sync
+- the app should not replace a good index with a partial/empty one
+- webapp writes reindex only the touched Markdown file, so capture/todo edits update without a full vault scan
+- file reads are retried up to `ICLOUD_READ_RETRY_COUNT`
+- launchd asks iCloud to download Hermes skill paths and then pre-reads them when `HYDRATE_VAULT_ON_START=true`, so Hermes has a better chance of loading `.agents/skills` without transient `-11` failures; this happens in Hermes startup and should not block the webapp itself
+
+If the index stays stale:
+
+1. Open Obsidian/Finder and let iCloud finish syncing the vault.
+2. Avoid repeatedly clicking rebuild during active iCloud sync.
+3. Wait at least `ICLOUD_WATCH_DEBOUNCE_MS` milliseconds, then rebuild once.
+4. If needed, run:
+
+```bash
+cd /Users/vamshi/Documents/obsidian/second-brain-app
+npm run doctor
+```
    - app/vault git state
 
 ## Common Failure Modes
@@ -101,8 +136,8 @@ npm run doctor
 ### Chat does not respond
 
 1. Run `npm run doctor`.
-2. Confirm OpenCode is listening on `4096`.
-3. Confirm `OPENCODE_BASE_URL=http://127.0.0.1:4096`.
+2. Confirm Hermes is listening on `8642` when `CHAT_PROVIDER=hermes`.
+3. Confirm `HERMES_BASE_URL=http://127.0.0.1:8642/v1`.
 4. Check logs with `npm run service:logs`.
 
 ### Wrong auth method appears
@@ -159,7 +194,7 @@ Check:
 
 - Capture writes still land in the current monthly fleeting note.
 - Dashboard -> Settings shows index watcher as healthy.
-- OpenCode is listening on `4096`.
+- Hermes is listening on `8642` when `CHAT_PROVIDER=hermes`.
 - GitHub auth still works in the browser.
 - App repo dirty state is expected.
 - Vault repo dirty state is expected.
@@ -175,7 +210,7 @@ Check:
 - `.data/` has not accidentally been committed.
 - Current month fleeting file is being created/written correctly.
 - Sprint/OKR tab resolves the current quarter/sprint.
-- OpenCode still starts from the vault and can see `.opencode/agents` and `.agents/skills`.
+- Hermes still starts from the vault and can see Markdown notes and `.agents/skills`.
 
 ## Before Bigger Refactors
 
