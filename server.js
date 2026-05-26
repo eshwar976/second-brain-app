@@ -72,6 +72,7 @@ const HERMES_THINKING_MODEL = process.env.HERMES_THINKING_MODEL || "deepseek-v4-
 const HERMES_REQUEST_TIMEOUT_MS = Math.max(10000, Number(process.env.HERMES_REQUEST_TIMEOUT_MS || "120000"));
 const HERMES_CHAT_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_CHAT_TIMEOUT_MS || HERMES_REQUEST_TIMEOUT_MS));
 const HERMES_CHAT_SLOW_LOG_MS = Math.max(5000, Number(process.env.HERMES_CHAT_SLOW_LOG_MS || "30000"));
+const HERMES_WORKFLOW_TIMEOUT_MS = Math.max(60000, Number(process.env.HERMES_WORKFLOW_TIMEOUT_MS || "900000"));
 const CHAT_SELECTED_CONTEXT_ENTRY_LIMIT = Math.max(4000, Number(process.env.CHAT_SELECTED_CONTEXT_ENTRY_LIMIT || "16000"));
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || "";
 const DEEPSEEK_REGULAR_MODEL = process.env.DEEPSEEK_REGULAR_MODEL || process.env.DEEPSEEK_MODEL || "deepseek-v4-flash";
@@ -88,6 +89,7 @@ const CHAT_SESSIONS_DIR = normalizeVaultRelativeDir(process.env.CHAT_SESSIONS_DI
 const DEEP_WORK_SESSIONS_DIR = normalizeVaultRelativeDir(process.env.DEEP_WORK_SESSIONS_DIR || `${CHAT_SESSIONS_DIR}/deep-work`);
 const CHAT_NOTES_DIR = normalizeVaultRelativeDir(process.env.CHAT_NOTES_DIR || "3.Resources/gpt/notes");
 const FLEETING_REVIEWS_DIR = normalizeVaultRelativeDir(process.env.FLEETING_REVIEWS_DIR || "3.Resources/gpt/reviews/fleeting");
+const AUTOMATION_LOG_DIR = normalizeVaultRelativeDir(process.env.AUTOMATION_LOG_DIR || "3.Resources/gpt/automation-log");
 const PERSONAL_OKR_ROOT = normalizeVaultRelativeDir(process.env.PERSONAL_OKR_ROOT || "2.Areas/Personal/OKRs");
 const PERSONAL_IDEA_LEDGER_PATH = normalizeVaultRelativeMarkdownPath(process.env.PERSONAL_IDEA_LEDGER_PATH || "2.Areas/Personal/Ideas/idea-ledger.md");
 const PERSONAL_SYSTEM_PATH = normalizeVaultRelativeMarkdownPath(process.env.PERSONAL_SYSTEM_PATH || "2.Areas/Personal/System/Personal System.md");
@@ -290,6 +292,12 @@ const server = http.createServer(async (req, res) => {
       requireWriteAuth(req);
       const body = await readRequestJson(req);
       return sendJson(res, 200, await executeCapability("sprint.set_daily_focus", body));
+    }
+
+    if (url.pathname === "/api/workflows/run/stream" && req.method === "POST") {
+      requireWriteAuth(req);
+      const body = await readRequestJson(req);
+      return streamWorkflowRun(res, body);
     }
 
     if (url.pathname === "/api/notes/search" && req.method === "GET") {
@@ -1796,6 +1804,338 @@ async function streamChatResponse(res, body) {
   } finally {
     res.end();
   }
+}
+
+const HERMES_WORKFLOWS = {
+  "categorize-fleeting": {
+    label: "Categorize Fleeting",
+    description: "Classify pending fleeting lines with domain and activity metadata.",
+    prompt: [
+      "Use the appropriate vault skill for personal management/about-me curation.",
+      "Categorize the current fleeting note with domain and activity for pending entries.",
+      "Identify if any sources are needed.",
+      "Only edit the relevant fleeting note lines that need metadata.",
+      "Do not rewrite unrelated entries.",
+      "When finished, summarize changed count, skipped count, and any entries needing sources."
+    ].join("\n")
+  },
+  "sprint-review": {
+    label: "Review Sprint",
+    description: "Review current sprint, OKRs, habits, and daily focus.",
+    prompt: [
+      "Use the personal-manager skill and the vault-native personal OKR/sprint notes.",
+      "Review the current personal sprint against identity, OKRs, habits, daily focus, and recent fleeting logs.",
+      "Do not make broad changes unless the relevant skill explicitly calls for them.",
+      "Return a concise status: what is on track, what needs attention, and the next best adjustment."
+    ].join("\n")
+  },
+  "plan-next-sprint": {
+    label: "Plan Next Sprint",
+    description: "Prepare next sprint guidance from current OKR state.",
+    prompt: [
+      "Use the personal-manager skill and vault-native personal OKR/sprint notes.",
+      "Prepare next personal sprint guidance from current OKR progress, identity, habits, and recent logs.",
+      "If a next sprint file already exists, review it instead of creating duplicates.",
+      "If changes are needed, keep them scoped to personal sprint planning files.",
+      "Return what you created or changed, and what still needs user confirmation."
+    ].join("\n")
+  },
+  "review-habits": {
+    label: "Review Habits",
+    description: "Review OKR-level habit consistency.",
+    prompt: [
+      "Use the personal-manager skill and the personal OKR habit definitions.",
+      "Review tracked habit consistency for the active quarter using fleeting [activity:: ...] logs.",
+      "Do not change targets automatically unless the vault skill says the format supports it and the change is obviously safe.",
+      "Return habit status, risk, and one small recommendation per habit that needs attention."
+    ].join("\n")
+  },
+  "vault-maintenance": {
+    label: "Vault Maintenance",
+    description: "Look for low-risk vault hygiene issues.",
+    prompt: [
+      "Act as a careful vault maintainer.",
+      "Look for low-risk vault hygiene issues: stale inbox/capture items, broken obvious links, unprocessed clipped notes, stale todos, and missing lightweight metadata.",
+      "Prefer reporting and small safe edits over broad rewrites.",
+      "Do not modify app code.",
+      "Return changed files, suggested follow-ups, and anything skipped because it needed user judgment."
+    ].join("\n")
+  },
+  "llm-wiki-distill": {
+    label: "Distill LLM Wiki Clips",
+    description: "Find and distill unprocessed LLM/wiki source clips.",
+    prompt: [
+      "Use the vault's LLM wiki conventions and any relevant skills.",
+      "Find unprocessed web clipper/source notes related to LLMs or AI.",
+      "Distill useful concepts into durable notes only where the source is clear and worth keeping.",
+      "Preserve source links and avoid duplicate concept notes.",
+      "Return created notes, skipped clips, and any sources that need manual review."
+    ].join("\n")
+  }
+};
+
+async function streamWorkflowRun(res, body = {}) {
+  res.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+
+  const writeEvent = (event) => {
+    res.write(`${JSON.stringify(event)}\n`);
+  };
+  const started = new Date();
+  let workflow = null;
+  let runId = "";
+  const events = [];
+
+  try {
+    workflow = getHermesWorkflow(body?.workflow);
+    writeEvent({ type: "workflow", workflow: getPublicWorkflow(workflow) });
+    const prompt = buildHermesWorkflowPrompt(workflow, body);
+    const run = await startHermesWorkflowRun({ workflow, prompt });
+    runId = run.runId;
+    writeEvent({ type: "started", runId });
+
+    await streamHermesWorkflowEvents(runId, (event) => {
+      events.push(event);
+      writeEvent({ type: "event", event });
+    });
+
+    const summary = summarizeHermesWorkflowEvents(events);
+    const logPath = await appendAutomationLogEntry({
+      workflow,
+      runId,
+      status: "completed",
+      started,
+      ended: new Date(),
+      summary,
+      events
+    });
+    writeEvent({ type: "done", runId, summary, logPath });
+  } catch (error) {
+    const message = error.expose ? error.message : "Workflow run failed.";
+    let logPath = "";
+    if (workflow) {
+      logPath = await appendAutomationLogEntry({
+        workflow,
+        runId,
+        status: "failed",
+        started,
+        ended: new Date(),
+        summary: message,
+        events,
+        error: message
+      }).catch(() => "");
+    }
+    writeEvent({ type: "error", error: message, runId, logPath });
+  } finally {
+    res.end();
+  }
+}
+
+function getHermesWorkflow(workflowId) {
+  const id = String(workflowId || "").trim();
+  const workflow = HERMES_WORKFLOWS[id];
+  if (!workflow) throw httpError(400, "Unknown workflow.");
+  return { id, ...workflow };
+}
+
+function getPublicWorkflow(workflow) {
+  return {
+    id: workflow.id,
+    label: workflow.label,
+    description: workflow.description
+  };
+}
+
+function buildHermesWorkflowPrompt(workflow, body = {}) {
+  const context = [];
+  const source = String(body?.source || "").trim();
+  const notePath = String(body?.notePath || "").trim();
+  const userNote = String(body?.note || "").trim();
+  if (source) context.push(`Source UI: ${source}`);
+  if (notePath) context.push(`Relevant note path: ${notePath}`);
+  if (userNote) context.push(`User note: ${clipText(userNote, 1000)}`);
+  return [
+    workflow.prompt,
+    "",
+    "Operational rules:",
+    "- Use vault-native skills and files where appropriate.",
+    "- Keep edits narrow and explain exactly what changed.",
+    "- If a source or decision is ambiguous, report it instead of guessing.",
+    "- Finish with a concise run summary.",
+    context.length ? ["", "Webapp context:", ...context].join("\n") : ""
+  ].filter(Boolean).join("\n");
+}
+
+async function startHermesWorkflowRun({ workflow, prompt }) {
+  const data = await hermesFetch("/runs", {
+    method: "POST",
+    timeoutMs: HERMES_REQUEST_TIMEOUT_MS,
+    body: {
+      prompt,
+      metadata: {
+        source: "second-brain-webapp",
+        workflow: workflow.id,
+        label: workflow.label
+      }
+    }
+  });
+  const runId = String(data.run_id || data.runId || data.id || data.run?.id || "").trim();
+  if (!runId) throw httpError(502, "Hermes did not return a run id.");
+  return { runId, raw: data };
+}
+
+async function streamHermesWorkflowEvents(runId, onEvent = () => {}) {
+  const data = await hermesFetchEventStream(`/runs/${encodeURIComponent(runId)}/events`, {
+    timeoutMs: HERMES_WORKFLOW_TIMEOUT_MS,
+    onEvent
+  });
+  return data;
+}
+
+async function hermesFetchEventStream(endpoint, { timeoutMs = HERMES_WORKFLOW_TIMEOUT_MS, onEvent = () => {} } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(getHermesApiUrl(endpoint), {
+      method: "GET",
+      headers: getHermesHeaders(),
+      signal: controller.signal
+    });
+  } catch (error) {
+    const detail = error.name === "AbortError"
+      ? "Hermes workflow timed out"
+      : `Hermes workflow events are not reachable at ${HERMES_BASE_URL}.`;
+    throw httpError(error.name === "AbortError" ? 504 : 503, detail);
+  }
+
+  try {
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw httpError(response.status, data.error?.message || data.message || `Hermes event stream failed: ${endpoint}`);
+    }
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const events = [];
+    const consumeLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith(":")) return;
+      const payload = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
+      if (!payload || payload === "[DONE]") return;
+      let data;
+      try {
+        data = JSON.parse(payload);
+      } catch {
+        data = { message: payload };
+      }
+      const event = normalizeHermesWorkflowEvent(data);
+      events.push(event);
+      onEvent(event);
+    };
+    const flushBuffer = (force = false) => {
+      const lines = buffer.split(/\r?\n/);
+      if (force) {
+        buffer = "";
+        lines.forEach(consumeLine);
+        return;
+      }
+      buffer = lines.pop() || "";
+      lines.forEach(consumeLine);
+    };
+
+    if (response.body && typeof response.body.getReader === "function") {
+      const reader = response.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        flushBuffer();
+      }
+    } else if (response.body) {
+      for await (const chunk of response.body) {
+        buffer += decoder.decode(chunk, { stream: true });
+        flushBuffer();
+      }
+    }
+    buffer += decoder.decode();
+    flushBuffer(true);
+    return { events };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeHermesWorkflowEvent(data = {}) {
+  const type = String(data.type || data.event || data.status || "event").trim();
+  const message = [
+    data.message,
+    data.title,
+    data.summary,
+    data.content,
+    data.text,
+    typeof data === "string" ? data : ""
+  ].find((value) => String(value || "").trim());
+  return {
+    type,
+    message: clipText(String(message || type), 500),
+    raw: data
+  };
+}
+
+function summarizeHermesWorkflowEvents(events = []) {
+  const candidates = events
+    .map((event) => String(event.message || "").trim())
+    .filter(Boolean);
+  return candidates.length ? clipText(candidates[candidates.length - 1], 1200) : "Hermes workflow completed.";
+}
+
+async function appendAutomationLogEntry({ workflow, runId = "", status, started, ended, summary = "", events = [], error = "" }) {
+  const now = ended || new Date();
+  const relativePath = `${AUTOMATION_LOG_DIR}/${getCurrentMonthSlug(now)}.md`;
+  const filePath = resolveVaultRelativePath(relativePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  let existing = "";
+  try {
+    existing = await fs.readFile(filePath, "utf8");
+  } catch (readError) {
+    if (readError.code !== "ENOENT") throw readError;
+    existing = `# Automation Log - ${getCurrentMonthSlug(now)}\n`;
+  }
+  const durationMs = ended && started ? ended.getTime() - started.getTime() : 0;
+  const lines = [
+    "",
+    `## ${formatTimestamp(now)} - ${workflow.label}`,
+    "",
+    `- status: ${status}`,
+    `- workflow: ${workflow.id}`,
+    runId ? `- hermes-run: ${runId}` : "",
+    started ? `- started: ${started.toISOString()}` : "",
+    ended ? `- ended: ${ended.toISOString()}` : "",
+    durationMs ? `- duration: ${formatDurationMs(durationMs)}` : "",
+    summary ? `- summary: ${singleLineMarkdown(summary)}` : "",
+    error ? `- error: ${singleLineMarkdown(error)}` : "",
+    events.length ? "- events:" : "",
+    ...events.slice(-20).map((event) => `  - ${singleLineMarkdown(event.message || event.type || "event")}`)
+  ].filter((line) => line !== "");
+  await fs.writeFile(filePath, `${existing.trimEnd()}\n${lines.join("\n")}\n`, "utf8");
+  await reindexMarkdownFile(filePath, { reason: "automation-log" }).catch(() => null);
+  return relativePath;
+}
+
+function singleLineMarkdown(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().replace(/\|/g, "\\|").slice(0, 1200);
+}
+
+function formatDurationMs(ms) {
+  const seconds = Math.max(1, Math.round(Number(ms || 0) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
 }
 
 function normalizeOptionalChatSessionPath(sessionPath) {

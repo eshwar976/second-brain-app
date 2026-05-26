@@ -189,6 +189,34 @@ export const SECOND_BRAIN_CAPABILITIES = [
     output: { type: "object" }
   },
   {
+    name: "workflow.run",
+    phase: CAPABILITY_PHASE.later,
+    risk: CAPABILITY_RISK.update,
+    description: "Start a Hermes-backed vault workflow such as categorization, sprint review, habit review, or vault maintenance.",
+    http: { method: "POST", path: "/api/workflows/run/stream" },
+    input: {
+      type: "object",
+      required: ["workflow"],
+      properties: {
+        workflow: {
+          type: "string",
+          enum: ["categorize-fleeting", "sprint-review", "plan-next-sprint", "review-habits", "vault-maintenance", "llm-wiki-distill"]
+        },
+        source: { type: "string" },
+        notePath: { type: "string" },
+        note: { type: "string" }
+      }
+    },
+    output: {
+      type: "object",
+      properties: {
+        runId: { type: "string" },
+        summary: { type: "string" },
+        logPath: { type: "string" }
+      }
+    }
+  },
+  {
     name: "vault.search",
     phase: CAPABILITY_PHASE.later,
     risk: CAPABILITY_RISK.read,

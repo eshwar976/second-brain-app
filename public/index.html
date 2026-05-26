@@ -271,9 +271,12 @@
               <div class="toolbar-actions control-strip sprint-control-strip">
                 <div class="sprint-view-tabs segmented-control" id="sprint-view-toggle" role="tablist" aria-label="Sprint views"></div>
                 <button class="secondary-button control-button" id="sprint-categorize-button" type="button">Categorize</button>
+                <button class="secondary-button control-button" id="sprint-review-button" type="button">Review</button>
+                <button class="secondary-button control-button" id="sprint-plan-button" type="button">Plan next</button>
                 <button class="secondary-button control-button" id="sprint-refresh-button" type="button">Refresh</button>
               </div>
             </div>
+            <div class="workflow-status" id="sprint-workflow-status" hidden></div>
             <div class="sprint-content" id="sprint-content">
               <div class="empty-state">
                 <p class="empty-title">Sprint is waiting to load.</p>
@@ -290,7 +293,7 @@
               <section class="dashboard-section dashboard-section-wide">
                 <div class="section-heading-row">
                   <h2>Habits</h2>
-                  <span>Quarter OKRs</span>
+                  <button class="secondary-button compact-button" id="dashboard-review-habits" type="button">Review</button>
                 </div>
                 <div class="habit-dashboard" id="dashboard-habits">
                   <p class="quiet-line">Loading habit state...</p>
@@ -313,6 +316,17 @@
                 <div class="deep-work-history" id="dashboard-deep-work">
                   <p class="quiet-line">Loading Deep Work history...</p>
                 </div>
+              </section>
+              <section class="dashboard-section dashboard-section-wide">
+                <div class="section-heading-row">
+                  <h2>Hermes workflows</h2>
+                  <span>Vault care</span>
+                </div>
+                <div class="workflow-actions">
+                  <button class="secondary-button compact-button" id="dashboard-vault-maintenance" type="button">Vault maintenance</button>
+                  <button class="secondary-button compact-button" id="dashboard-llm-wiki-distill" type="button">Distill clips</button>
+                </div>
+                <div class="workflow-status" id="dashboard-workflow-status" hidden></div>
               </section>
               <details class="dashboard-section dashboard-section-wide settings-section">
                 <summary class="settings-summary">

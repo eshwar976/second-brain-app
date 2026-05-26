@@ -31,6 +31,7 @@ const CHAT_SUGGEST_DEBOUNCE_MS = 90;
 const CHAT_CONTEXT_SUGGEST_DEBOUNCE_MS = 420;
 const CHAT_AUTO_RESUME_MS = 30 * 60 * 1000;
 const CHAT_CLIENT_TIMEOUT_MS = 150000;
+const WORKFLOW_CLIENT_TIMEOUT_MS = 15 * 60 * 1000;
 const RECENT_CONTEXT_LIMIT = 6;
 const PINNED_CONTEXT_LIMIT = 8;
 const PULL_REFRESH_TRIGGER_PX = 72;
@@ -102,6 +103,14 @@ const state = {
   chatSummarySaving: false,
   chatTodosExtracting: false,
   chatNoteCreating: false,
+  workflows: {
+    active: false,
+    id: "",
+    label: "",
+    status: "",
+    events: [],
+    logPath: ""
+  },
   habitPopover: null,
   pendingTriageTask: null,
   pendingEdit: null,
@@ -206,10 +215,17 @@ const dashboardCadenceToggle = document.querySelector("#dashboard-cadence-toggle
 const dashboardHabits = document.querySelector("#dashboard-habits");
 const dashboardDeepWork = document.querySelector("#dashboard-deep-work");
 const dashboardDeepWorkRefresh = document.querySelector("#dashboard-deep-work-refresh");
+const dashboardReviewHabitsButton = document.querySelector("#dashboard-review-habits");
+const dashboardVaultMaintenanceButton = document.querySelector("#dashboard-vault-maintenance");
+const dashboardLlmWikiDistillButton = document.querySelector("#dashboard-llm-wiki-distill");
+const dashboardWorkflowStatus = document.querySelector("#dashboard-workflow-status");
 const sprintContent = document.querySelector("#sprint-content");
 const sprintViewToggle = document.querySelector("#sprint-view-toggle");
 const sprintCategorizeButton = document.querySelector("#sprint-categorize-button");
+const sprintReviewButton = document.querySelector("#sprint-review-button");
+const sprintPlanButton = document.querySelector("#sprint-plan-button");
 const sprintRefreshButton = document.querySelector("#sprint-refresh-button");
+const sprintWorkflowStatus = document.querySelector("#sprint-workflow-status");
 const todoSheet = document.querySelector("#todo-sheet");
 const todoSheetKicker = todoSheet?.querySelector(".sheet-header .eyebrow");
 const todoSheetTitle = document.querySelector("#todo-sheet-title");
@@ -641,7 +657,27 @@ function wireInteractions() {
   });
 
   sprintCategorizeButton?.addEventListener("click", async () => {
-    await openSprintCategorizeSession();
+    await runHermesWorkflow("categorize-fleeting", { source: "sprint" });
+  });
+
+  sprintReviewButton?.addEventListener("click", async () => {
+    await runHermesWorkflow("sprint-review", { source: "sprint", notePath: state.personalSprint?.sprint?.path || "" });
+  });
+
+  sprintPlanButton?.addEventListener("click", async () => {
+    await runHermesWorkflow("plan-next-sprint", { source: "sprint", notePath: state.personalSprint?.sprint?.path || "" });
+  });
+
+  dashboardReviewHabitsButton?.addEventListener("click", async () => {
+    await runHermesWorkflow("review-habits", { source: "dashboard", notePath: state.dashboard?.habits?.okrPath || "" });
+  });
+
+  dashboardVaultMaintenanceButton?.addEventListener("click", async () => {
+    await runHermesWorkflow("vault-maintenance", { source: "dashboard" });
+  });
+
+  dashboardLlmWikiDistillButton?.addEventListener("click", async () => {
+    await runHermesWorkflow("llm-wiki-distill", { source: "dashboard" });
   });
 
   actionToast?.addEventListener("click", async (event) => {
@@ -752,6 +788,18 @@ function wireInteractions() {
     renderDashboard();
   });
   dashboardHabits?.addEventListener("click", handleHabitDotClick);
+  dashboardWorkflowStatus?.addEventListener("click", (event) => {
+    const noteButton = event.target.closest("[data-open-note]");
+    if (!noteButton) return;
+    event.preventDefault();
+    openObsidianNote(noteButton.dataset.openNote || "");
+  });
+  sprintWorkflowStatus?.addEventListener("click", (event) => {
+    const noteButton = event.target.closest("[data-open-note]");
+    if (!noteButton) return;
+    event.preventDefault();
+    openObsidianNote(noteButton.dataset.openNote || "");
+  });
   document.addEventListener("click", handleHabitPopoverDismiss);
   window.addEventListener("resize", closeHabitPopover, { passive: true });
   window.visualViewport?.addEventListener("resize", closeHabitPopover, { passive: true });
@@ -3274,6 +3322,126 @@ function getCurrentChatTranscript() {
     .filter((message) => message.role === "user" || message.role === "assistant");
   if (!messages.length) return "";
   return messages.map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`).join("\n\n");
+}
+
+async function runHermesWorkflow(workflow, context = {}) {
+  if (state.workflows.active) {
+    showToast("A Hermes workflow is already running.", { duration: 2400 });
+    return;
+  }
+  state.workflows = {
+    active: true,
+    id: workflow,
+    label: getWorkflowLabel(workflow),
+    status: "Starting...",
+    events: [],
+    logPath: ""
+  };
+  renderWorkflowStatus();
+  setWorkflowButtonsDisabled(true);
+  showToast(`${state.workflows.label} started.`);
+  try {
+    const result = await postWorkflowStream({
+      workflow,
+      ...context
+    }, {
+      onWorkflow(data) {
+        state.workflows.label = data?.label || state.workflows.label;
+        renderWorkflowStatus();
+      },
+      onStarted(runId) {
+        state.workflows.status = runId ? `Running (${runId})` : "Running...";
+        renderWorkflowStatus();
+      },
+      onEvent(event) {
+        const message = event?.message || event?.type || "Hermes event";
+        state.workflows.events = [...state.workflows.events, message].slice(-5);
+        state.workflows.status = message;
+        renderWorkflowStatus();
+      }
+    });
+    state.workflows.active = false;
+    state.workflows.status = result.summary || "Workflow complete.";
+    state.workflows.logPath = result.logPath || "";
+    renderWorkflowStatus();
+    showToast(`${state.workflows.label} complete.`);
+    await refreshWorkflowSurfaces(workflow);
+  } catch (error) {
+    state.workflows.active = false;
+    state.workflows.status = error.message;
+    renderWorkflowStatus();
+    showToast(error.message, { duration: 3600 });
+  } finally {
+    setWorkflowButtonsDisabled(false);
+  }
+}
+
+function getWorkflowLabel(workflow) {
+  const labels = {
+    "categorize-fleeting": "Categorize Fleeting",
+    "sprint-review": "Review Sprint",
+    "plan-next-sprint": "Plan Next Sprint",
+    "review-habits": "Review Habits",
+    "vault-maintenance": "Vault Maintenance",
+    "llm-wiki-distill": "Distill Clips"
+  };
+  return labels[workflow] || "Hermes Workflow";
+}
+
+async function refreshWorkflowSurfaces(workflow) {
+  if (workflow === "categorize-fleeting") {
+    await loadCaptures();
+    await loadPersonalSprint();
+    await loadDashboard();
+    return;
+  }
+  if (workflow === "sprint-review" || workflow === "plan-next-sprint" || workflow === "review-habits") {
+    await loadPersonalSprint();
+    await loadDashboard();
+    return;
+  }
+  if (workflow === "vault-maintenance" || workflow === "llm-wiki-distill") {
+    await loadDashboard();
+    await loadIndexStatus();
+  }
+}
+
+function renderWorkflowStatus() {
+  const status = state.workflows || {};
+  const shouldShow = Boolean(status.active || status.status || status.logPath);
+  const html = shouldShow ? `
+    <div class="workflow-status-card ${status.active ? "is-running" : ""}">
+      <div>
+        <span>${escapeHtml(status.active ? "Hermes running" : "Hermes workflow")}</span>
+        <strong>${escapeHtml(status.label || "Workflow")}</strong>
+        <p>${escapeHtml(status.status || "")}</p>
+      </div>
+      ${status.logPath ? `<button class="inline-note-link" type="button" data-open-note="${escapeHtml(status.logPath)}">Open log</button>` : ""}
+      ${status.events?.length ? `
+        <ul>
+          ${status.events.map((event) => `<li>${escapeHtml(event)}</li>`).join("")}
+        </ul>
+      ` : ""}
+    </div>
+  ` : "";
+  [sprintWorkflowStatus, dashboardWorkflowStatus].forEach((element) => {
+    if (!element) return;
+    element.hidden = !shouldShow;
+    element.innerHTML = html;
+  });
+}
+
+function setWorkflowButtonsDisabled(disabled) {
+  [
+    sprintCategorizeButton,
+    sprintReviewButton,
+    sprintPlanButton,
+    dashboardReviewHabitsButton,
+    dashboardVaultMaintenanceButton,
+    dashboardLlmWikiDistillButton
+  ].forEach((button) => {
+    if (button) button.disabled = disabled;
+  });
 }
 
 function handleChatSourceClick(event) {
@@ -5857,6 +6025,84 @@ async function postChatStream(payload, handlers = {}) {
     buffer += decoder.decode();
     flushBuffer(true);
     if (!donePayload) throw new Error("Chat stream ended before Hermes returned a final response.");
+    return donePayload;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function postWorkflowStream(payload, handlers = {}) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), WORKFLOW_CLIENT_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch("/api/workflows/run/stream", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: getWriteHeaders(),
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch (error) {
+    window.clearTimeout(timer);
+    throw new Error(error.name === "AbortError" ? "Hermes workflow timed out." : "Workflow request failed.");
+  }
+
+  try {
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      handleAuthError(response.status);
+      throw new Error(data.error || "Request failed.");
+    }
+    if (!response.body) {
+      return await response.json();
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let donePayload = null;
+    const consumeLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let event;
+      try {
+        event = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+      if (event.type === "workflow") {
+        handlers.onWorkflow?.(event.workflow);
+      } else if (event.type === "started") {
+        handlers.onStarted?.(event.runId || "");
+      } else if (event.type === "event") {
+        handlers.onEvent?.(event.event || {});
+      } else if (event.type === "done") {
+        donePayload = event;
+        handlers.onDone?.(event);
+      } else if (event.type === "error") {
+        throw new Error(event.error || "Workflow failed.");
+      }
+    };
+    const flushBuffer = (force = false) => {
+      const lines = buffer.split(/\r?\n/);
+      if (force) {
+        buffer = "";
+        lines.forEach(consumeLine);
+        return;
+      }
+      buffer = lines.pop() || "";
+      lines.forEach(consumeLine);
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      flushBuffer();
+    }
+    buffer += decoder.decode();
+    flushBuffer(true);
+    if (!donePayload) throw new Error("Workflow ended before Hermes returned completion.");
     return donePayload;
   } finally {
     window.clearTimeout(timer);
