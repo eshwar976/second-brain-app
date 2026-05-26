@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "0.1.0",
+  "name": "Second Brain Web Source",
+  "behavior": "create",
+  "noteNameFormat": "{{title|safe_name}}",
+  "path": "3.Resources/Sources/web/inbox",
+  "properties": [
+    {
+      "name": "type",
+      "value": "source",
+      "type": "text"
+    },
+    {
+      "name": "source_kind",
+      "value": "web",
+      "type": "text"
+    },
+    {
+      "name": "status",
+      "value": "inbox",
+      "type": "text"
+    },
+    {
+      "name": "wiki_status",
+      "value": "pending",
+      "type": "text"
+    },
+    {
+      "name": "url",
+      "value": "{{url}}",
+      "type": "text"
+    },
+    {
+      "name": "title",
+      "value": "{{title}}",
+      "type": "text"
+    },
+    {
+      "name": "clipped_at",
+      "value": "{{date}}",
+      "type": "date"
+    }
+  ],
+  "triggers": [
+    "schema:@Article"
+  ],
+  "noteContentFormat": "# {{title}}\n\nSource URL: {{url}}\n\n## Full Text\n\n{{content}}\n\n## Notes\n\n"
+}
