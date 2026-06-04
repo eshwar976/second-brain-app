@@ -30,7 +30,7 @@ const PINNED_CONTEXT_STORAGE_KEY = "secondBrain.chat.pinnedContext";
 const CHAT_SUGGEST_DEBOUNCE_MS = 90;
 const CHAT_CONTEXT_SUGGEST_DEBOUNCE_MS = 420;
 const CHAT_AUTO_RESUME_MS = 30 * 60 * 1000;
-const CHAT_CLIENT_TIMEOUT_MS = 150000;
+const CHAT_CLIENT_TIMEOUT_MS = 210000;
 const WORKFLOW_CLIENT_TIMEOUT_MS = 15 * 60 * 1000;
 const RECENT_CONTEXT_LIMIT = 6;
 const PINNED_CONTEXT_LIMIT = 8;
@@ -3099,6 +3099,7 @@ async function submitChat() {
       assistant: null,
       people: [],
       isPending: true,
+      status: state.deepWorkEnabled ? "Deep Work is active. Hermes is reading the vault..." : "Hermes is thinking...",
       sessionPath: state.chatSession?.path || activeSessionPath
     };
     state.chatMessages.push(assistantMessage);
@@ -3134,6 +3135,11 @@ async function submitChat() {
             content: streamedAnswer,
             isPending: false
           });
+        },
+        onStatus(message) {
+          if (!message) return;
+          updateChatMessage(assistantMessage.id, { status: message });
+          flashChatHelper(message);
         }
       })
       : await postJson("/api/chat", chatPayload);
@@ -3152,6 +3158,7 @@ async function submitChat() {
       model: data.model || "",
       thinkingMode: data.thinkingMode || state.chatThinkingMode,
       sessionPath: state.chatSession?.path || activeSessionPath,
+      status: "",
       isPending: false
     });
     flashChatHelper(data.sources?.length
@@ -3163,6 +3170,7 @@ async function submitChat() {
       updateChatMessage(assistantMessage.id, {
         content: error.message,
         sources: [],
+        status: "",
         isError: true,
         isPending: false
       });
@@ -3981,7 +3989,7 @@ function renderChat() {
       <div class="chat-message-body">
         <p class="chat-role">${message.role === "user" ? "You" : "Second Brain"}</p>
         ${message.role === "user" ? renderChatMessageContext(message.context) : ""}
-        ${message.isPending ? renderTypingIndicator() : `<div class="chat-text">${formatMessageText(message.content)}</div>`}
+        ${message.isPending ? renderTypingIndicator(message.status) : `<div class="chat-text">${formatMessageText(message.content)}</div>`}
         ${message.isPending ? "" : renderChatContexts(message)}
         ${message.isPending ? "" : message.sources?.length ? renderChatSources(message.sources) : ""}
       </div>
@@ -4005,12 +4013,16 @@ function renderDeepWorkFocusCard() {
   `;
 }
 
-function renderTypingIndicator() {
+function renderTypingIndicator(status = "") {
+  const cleanStatus = String(status || "").trim();
   return `
-    <div class="typing-indicator" aria-label="Assistant is thinking">
-      <span></span>
-      <span></span>
-      <span></span>
+    <div class="typing-state">
+      <div class="typing-indicator" aria-label="Assistant is thinking">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+      ${cleanStatus ? `<p>${escapeHtml(cleanStatus)}</p>` : ""}
     </div>
   `;
 }
@@ -5998,6 +6010,8 @@ async function postChatStream(payload, handlers = {}) {
         handlers.onSession?.(event.session);
       } else if (event.type === "delta") {
         handlers.onDelta?.(event.delta || "");
+      } else if (event.type === "status") {
+        handlers.onStatus?.(event.message || "");
       } else if (event.type === "done") {
         donePayload = event;
         handlers.onDone?.(event);

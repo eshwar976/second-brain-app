@@ -572,7 +572,8 @@ h1 {
 
 .chat-message.is-pending .chat-message-body {
   width: auto;
-  min-width: 88px;
+  min-width: 160px;
+  max-width: min(82%, 520px);
 }
 
 .chat-role {
@@ -753,11 +754,30 @@ h1 {
   border-top-color: rgba(59, 57, 51, 0.9);
 }
 
+.typing-state {
+  display: grid;
+  gap: 8px;
+}
+
 .typing-indicator {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   min-height: 18px;
+}
+
+.typing-state p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+@media (max-width: 720px) {
+  .chat-message.is-pending .chat-message-body {
+    max-width: 92%;
+  }
 }
 
 .typing-indicator span {

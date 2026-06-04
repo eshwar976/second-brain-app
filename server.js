@@ -70,7 +70,7 @@ const HERMES_BIN = process.env.HERMES_BIN || "";
 const HERMES_REGULAR_MODEL = process.env.HERMES_REGULAR_MODEL || process.env.HERMES_MODEL || "deepseek-v4-flash";
 const HERMES_THINKING_MODEL = process.env.HERMES_THINKING_MODEL || "deepseek-v4-pro";
 const HERMES_REQUEST_TIMEOUT_MS = Math.max(10000, Number(process.env.HERMES_REQUEST_TIMEOUT_MS || "120000"));
-const HERMES_CHAT_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_CHAT_TIMEOUT_MS || HERMES_REQUEST_TIMEOUT_MS));
+const HERMES_CHAT_TIMEOUT_MS = Math.max(30000, Number(process.env.HERMES_CHAT_TIMEOUT_MS || "180000"));
 const HERMES_CHAT_SLOW_LOG_MS = Math.max(5000, Number(process.env.HERMES_CHAT_SLOW_LOG_MS || "30000"));
 const HERMES_WORKFLOW_TIMEOUT_MS = Math.max(60000, Number(process.env.HERMES_WORKFLOW_TIMEOUT_MS || "900000"));
 const CHAT_SELECTED_CONTEXT_ENTRY_LIMIT = Math.max(4000, Number(process.env.CHAT_SELECTED_CONTEXT_ENTRY_LIMIT || "16000"));
@@ -1737,8 +1737,11 @@ async function streamChatResponse(res, body) {
   });
 
   const writeEvent = (event) => {
+    if (res.writableEnded) return;
     res.write(`${JSON.stringify(event)}\n`);
   };
+  const startedAt = Date.now();
+  let statusTimer = null;
 
   try {
     if (!isHermesChatProvider()) {
@@ -1750,6 +1753,21 @@ async function streamChatResponse(res, body) {
     const context = await prepareHermesChatContext(body);
     const session = context.existingSession || await createChatSession({ title: deriveChatSessionTitle(context.message) });
     writeEvent({ type: "session", session });
+    writeEvent({
+      type: "status",
+      message: context.deepWork?.enabled
+        ? "Deep Work is active. Hermes is reading the vault..."
+        : "Hermes is thinking..."
+    });
+    statusTimer = setInterval(() => {
+      const seconds = Math.round((Date.now() - startedAt) / 1000);
+      writeEvent({
+        type: "status",
+        message: seconds >= 45
+          ? `Hermes is still working (${seconds}s)...`
+          : "Hermes is still working..."
+      });
+    }, 15000);
 
     let answer = "";
     const response = await callHermesChatCompletionStream({
@@ -1800,8 +1818,10 @@ async function streamChatResponse(res, body) {
       deepWork: context.deepWork
     });
   } catch (error) {
-    writeEvent({ type: "error", error: error.expose ? error.message : "Chat request failed." });
+    const message = error.expose || error.statusCode ? error.message : "Chat request failed.";
+    writeEvent({ type: "error", error: message });
   } finally {
+    if (statusTimer) clearInterval(statusTimer);
     res.end();
   }
 }
@@ -1811,12 +1831,17 @@ const HERMES_WORKFLOWS = {
     label: "Categorize Fleeting",
     description: "Classify pending fleeting lines with domain and activity metadata.",
     prompt: [
-      "Use the appropriate vault skill for personal management/about-me curation.",
-      "Categorize the current fleeting note with domain and activity for pending entries.",
-      "Identify if any sources are needed.",
-      "Only edit the relevant fleeting note lines that need metadata.",
-      "Do not rewrite unrelated entries.",
-      "When finished, summarize changed count, skipped count, and any entries needing sources."
+      "Use the personal-manager automation scope `classify-fleeting` or about-me-curator Mode 4, whichever is more appropriate.",
+      "This is an explicit webapp/user invocation authorizing metadata-only classification writes to the current monthly fleeting note.",
+      "Target the current monthly fleeting note. Add missing inline metadata only:",
+      "- `[type:: X]` if missing",
+      "- `[domain:: X]` if clear",
+      "- `[activity:: X]` only when it clearly maps to current personal OKR activity tags",
+      "Do not stop at a proposal table for high-confidence metadata-only edits. Apply clear classifications directly.",
+      "Do not rewrite original entry text except inserting inline metadata after the timestamp/type metadata.",
+      "Do not create or update source notes in this workflow. If source work is needed, list it under `Needs source review` and leave it unchanged.",
+      "For ambiguous entries, leave them unchanged and list them under `Needs approval`.",
+      "When finished, summarize changed count, skipped count, needs-approval count, and needs-source-review count."
     ].join("\n")
   },
   "sprint-review": {
@@ -1915,7 +1940,7 @@ async function streamWorkflowRun(res, body = {}) {
     });
     writeEvent({ type: "done", runId, summary, logPath });
   } catch (error) {
-    const message = error.expose ? error.message : "Workflow run failed.";
+    const message = error.expose || error.statusCode ? error.message : "Workflow run failed.";
     let logPath = "";
     if (workflow) {
       logPath = await appendAutomationLogEntry({
@@ -1957,6 +1982,9 @@ function buildHermesWorkflowPrompt(workflow, body = {}) {
   const userNote = String(body?.note || "").trim();
   if (source) context.push(`Source UI: ${source}`);
   if (notePath) context.push(`Relevant note path: ${notePath}`);
+  if (workflow.id === "categorize-fleeting") {
+    context.push(`Current monthly fleeting note: 2.Areas/Personal/fleeting/${getCurrentMonthSlug()}.md`);
+  }
   if (userNote) context.push(`User note: ${clipText(userNote, 1000)}`);
   return [
     workflow.prompt,
@@ -1975,7 +2003,7 @@ async function startHermesWorkflowRun({ workflow, prompt }) {
     method: "POST",
     timeoutMs: HERMES_REQUEST_TIMEOUT_MS,
     body: {
-      prompt,
+      input: prompt,
       metadata: {
         source: "second-brain-webapp",
         workflow: workflow.id,
@@ -2033,6 +2061,7 @@ async function hermesFetchEventStream(endpoint, { timeoutMs = HERMES_WORKFLOW_TI
         data = { message: payload };
       }
       const event = normalizeHermesWorkflowEvent(data);
+      if (!event) return;
       events.push(event);
       onEvent(event);
     };
@@ -2071,12 +2100,15 @@ async function hermesFetchEventStream(endpoint, { timeoutMs = HERMES_WORKFLOW_TI
 
 function normalizeHermesWorkflowEvent(data = {}) {
   const type = String(data.type || data.event || data.status || "event").trim();
+  if (type === "message.delta" || type === "reasoning.available") return null;
   const message = [
     data.message,
     data.title,
     data.summary,
     data.content,
     data.text,
+    data.delta,
+    data.output,
     typeof data === "string" ? data : ""
   ].find((value) => String(value || "").trim());
   return {
@@ -3337,7 +3369,7 @@ function buildSelectedContextPrompt({ message, skill, people, files, deepWork })
       "Selected file context:",
       files.map((file) => [
         `${file.title} (${file.path}):`,
-        clipText(file.content || file.snippet || "", CHAT_SELECTED_CONTEXT_ENTRY_LIMIT)
+        clipText(file.content || file.snippet || "", getSelectedFileContextLimit(file))
       ].join("\n")).join("\n\n")
     ].join("\n"));
   }
@@ -3350,6 +3382,15 @@ function buildSelectedContextPrompt({ message, skill, people, files, deepWork })
     "",
     contextBlocks.join("\n\n")
   ].join("\n");
+}
+
+function getSelectedFileContextLimit(file = {}) {
+  const filePath = String(file.path || "").toLowerCase();
+  if (filePath.includes("/deep-work/")) return Math.min(CHAT_SELECTED_CONTEXT_ENTRY_LIMIT, 5000);
+  if (filePath.includes("/sprints/") || filePath.includes("/okrs/")) {
+    return Math.min(CHAT_SELECTED_CONTEXT_ENTRY_LIMIT, 8000);
+  }
+  return CHAT_SELECTED_CONTEXT_ENTRY_LIMIT;
 }
 
 function delay(ms) {
